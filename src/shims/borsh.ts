@@ -1,8 +1,7 @@
 // src/shims/borsh.ts
-// Bridge CommonJS borsh -> ESM named exports for Rollup/Vite builds.
+// Import the real library entry (this bypasses the alias because we used an exact-match regex)
+import * as realBorsh from 'borsh/lib/index.js';
 
-import * as borsh from 'borsh';
-
-export const serialize = (borsh as any).serialize;
-export const deserialize = (borsh as any).deserialize;
-export const deserializeUnchecked = (borsh as any).deserializeUnchecked;
+export const serialize = (realBorsh as any).serialize;
+export const deserialize = (realBorsh as any).deserialize;
+export const deserializeUnchecked = (realBorsh as any).deserializeUnchecked;
