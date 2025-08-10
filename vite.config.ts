@@ -8,23 +8,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const r = (p: string) => path.resolve(__dirname, p)
 
 export default defineConfig({
+  base: './', // 👈 important for IPFS gateways
   plugins: [
-    inject({
-      Buffer: ['buffer', 'Buffer'],
-    }),
+    inject({ Buffer: ['buffer', 'Buffer'] }),
   ],
-  define: {
-    'process.env': {},
-  },
+  define: { 'process.env': {} },
   resolve: {
-    alias: [
-      // 👇 exact-match only, so "borsh/lib/..." is NOT aliased
-      { find: /^borsh$/, replacement: r('src/shims/borsh.ts') },
-    ],
+    alias: [{ find: /^borsh$/, replacement: r('src/shims/borsh.ts') }],
   },
-  optimizeDeps: {
-    include: ['buffer'],
-  },
+  optimizeDeps: { include: ['buffer'] },
   build: {
     commonjsOptions: { transformMixedEsModules: true },
     sourcemap: false,

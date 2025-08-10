@@ -5,11 +5,26 @@
   <title>.sol Tip Jar + Meme Shrine</title>
 
   <!-- Jupiter Plugin v1 -->
-  <script src="https://plugin.jup.ag/plugin-v1.js"></script>
+  <script defer src="https://plugin.jup.ag/plugin-v1.js"></script>
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <!-- silence favicon 404 -->
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22/>" />
+
+  <!-- Optional: preconnects for faster first RPC call -->
+  <link rel="preconnect" href="https://api.mainnet-beta.solana.com" />
+  <link rel="preconnect" href="https://mainnet.helius-rpc.com" />
+
+  <!-- Runtime env fallback: only used if import.meta.env isn't present (e.g. raw source on IPFS). -->
+  <script>
+    window.__ENV__ = Object.assign({}, window.__ENV__ || {}, {
+      VITE_DEFAULT_CLUSTER: 'mainnet',
+      VITE_OWNER_SOL_DOMAIN: 'stonkystonkster.sol',
+      VITE_OWNER_WALLET: 'HeGffZqFhB9euhind4aJFWy8waLCppTkie4gvW8bQhzp',
+      // Put your real Helius key here or keep public fallback second
+      VITE_RPC_MAINNET: 'https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY,https://api.mainnet-beta.solana.com'
+    });
+  </script>
 
   <style>
     :root {
@@ -74,7 +89,7 @@
       <div class="mt-2">
         <div class="flex items-center justify-between mb-2">
           <h3 class="text-sm text-white/70">Swap to SOL (via Jupiter)</h3>
-          <span class="text-[11px] text-white/50" id="jup-cluster-label">devnet</span>
+          <span class="text-[11px] text-white/50" id="jup-cluster-label">mainnet</span>
         </div>
         <!-- Jupiter Plugin target -->
         <div id="jup-widget" class="rounded-xl overflow-hidden" style="width:100%; min-height:568px;"></div>
@@ -155,10 +170,10 @@
     </div>
   </div>
 
-  <!-- Your bundle -->
+  <!-- Your bundle (Vite rewrites this to /assets/index-*.js during build) -->
   <script type="module" src="/src/main.ts"></script>
-  <!-- Tailwind CDN (dev only) -->
-<script src="https://cdn.tailwindcss.com"></script>
 
+  <!-- Tailwind CDN (we keep it for now; warning in console is harmless without a PostCSS pipeline) -->
+  <script src="https://cdn.tailwindcss.com"></script>
 </body>
 </html>
