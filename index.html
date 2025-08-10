@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>.sol Tip Jar + Meme Shrine</title>
+
+  <!-- Jupiter Plugin v1 -->
+  <script src="https://plugin.jup.ag/plugin-v1.js"></script>
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <!-- silence favicon 404 -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22/>" />
+
+  <style>
+    :root {
+      /* Jupiter Plugin theme (tweak as you like) */
+      --jupiter-plugin-primary: 153, 69, 255;       /* #9945FF */
+      --jupiter-plugin-background: 11, 16, 32;      /* #0b1020 */
+      --jupiter-plugin-primary-text: 232, 249, 255; /* near-white */
+      --jupiter-plugin-warning: 251, 191, 36;       /* amber */
+      --jupiter-plugin-interactive: 20, 241, 149;   /* #14F195 */
+      --jupiter-plugin-module: 25, 36, 61;          /* panel bg-ish */
+    }
+
+    body {
+      background:
+        radial-gradient(1000px 600px at 20% 10%, #0ea5e9 0%, transparent 50%),
+        radial-gradient(900px 500px at 90% 10%, #22c55e 0%, transparent 50%),
+        radial-gradient(800px 500px at 50% 100%, #a78bfa 0%, transparent 50%),
+        #0b1020;
+      font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      color: #fff;
+    }
+    .glass { background: rgba(255,255,255,0.05); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.10); }
+    .btn-grad { background: linear-gradient(90deg, #9945FF, #14F195); background-size: 200% 200%; animation: gradientShift 4s ease infinite; }
+    @keyframes gradientShift { 0%{background-position:0% 50%} 50%{background-position:100% 50%} 100%{background-position:0% 50%} }
+  </style>
+</head>
+<body class="text-white">
+  <header class="max-w-5xl mx-auto p-6 flex justify-between items-center">
+    <h1 class="text-2xl font-bold tracking-tight">.sol Tip Jar + Meme Shrine</h1>
+    <button id="connect-wallet" class="btn-grad px-4 py-2 rounded-lg font-semibold hover:scale-105 transition">
+      Connect Wallet
+    </button>
+  </header>
+
+  <main class="max-w-5xl mx-auto p-6 grid gap-6 md:grid-cols-2">
+    <!-- Tip Jar Card -->
+    <section class="glass rounded-xl p-6 shadow-lg">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-xl font-semibold">💸 Tip Jar</h2>
+        <span class="text-xs text-white/70">to <span id="owner-sol" class="text-green-400 font-semibold"></span></span>
+      </div>
+
+      <div class="flex flex-wrap gap-2 mb-4">
+        <button class="tip-btn btn-grad px-3 py-1 rounded-md text-sm font-semibold" data-amount="0.05">0.05 SOL</button>
+        <button class="tip-btn btn-grad px-3 py-1 rounded-md text-sm font-semibold" data-amount="0.1">0.1 SOL</button>
+        <button class="tip-btn btn-grad px-3 py-1 rounded-md text-sm font-semibold" data-amount="0.5">0.5 SOL</button>
+        <button class="tip-btn btn-grad px-3 py-1 rounded-md text-sm font-semibold" data-amount="1">1 SOL</button>
+      </div>
+
+      <div class="flex gap-2 mb-4">
+        <input id="custom-tip" type="number" step="0.001" min="0" placeholder="Custom amount (SOL)"
+               class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm" />
+        <button id="qr-tip" class="px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition">
+          Pay via QR
+        </button>
+      </div>
+
+      <ul id="tip-feed" class="space-y-2 text-sm"></ul>
+
+      <!-- JUP SWAP embedded inside the Tip Jar card -->
+      <hr class="border-white/10 my-4">
+      <div class="mt-2">
+        <div class="flex items-center justify-between mb-2">
+          <h3 class="text-sm text-white/70">Swap to SOL (via Jupiter)</h3>
+          <span class="text-[11px] text-white/50" id="jup-cluster-label">devnet</span>
+        </div>
+        <!-- Jupiter Plugin target -->
+        <div id="jup-widget" class="rounded-xl overflow-hidden" style="width:100%; min-height:568px;"></div>
+      </div>
+    </section>
+
+    <!-- Meme Shrine Card -->
+    <section class="glass rounded-xl p-6 shadow-lg">
+      <h2 class="text-xl font-semibold mb-4">🖼️ Meme Shrine</h2>
+
+      <!-- Mode toggle -->
+      <div class="mb-3">
+        <div class="flex items-center gap-2 text-sm">
+          <button id="mode-api" class="px-3 py-1 rounded-md border border-white/15 bg-white/10 hover:bg-white/15 transition">API Templates</button>
+          <button id="mode-local" class="px-3 py-1 rounded-md border border-white/15 bg-white/5 hover:bg-white/10 transition">Upload (Canvas)</button>
+        </div>
+      </div>
+
+      <!-- API Templates Mode -->
+      <div id="api-mode" class="space-y-3 hidden">
+        <div class="flex items-center justify-between">
+          <h3 class="text-sm text-white/70">Popular Templates (live)</h3>
+          <input id="template-search" placeholder="Search…" class="bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-sm" />
+        </div>
+
+        <div id="api-templates" class="grid grid-cols-3 md:grid-cols-5 gap-2"></div>
+        <div id="api-pager" class="flex items-center justify-between text-xs text-white/70">
+          <button id="api-prev" class="px-3 py-1 rounded-md border border-white/15 bg-white/10 hover:bg-white/15 transition">Prev</button>
+          <div><span id="api-page">1</span> / <span id="api-pages">1</span></div>
+          <button id="api-next" class="px-3 py-1 rounded-md border border-white/15 bg-white/10 hover:bg-white/15 transition">Next</button>
+        </div>
+
+        <div class="grid md:grid-cols-2 gap-2">
+          <input id="api-top"    placeholder="Top text"    class="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm" />
+          <input id="api-bottom" placeholder="Bottom text" class="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm" />
+        </div>
+
+        <div class="glass rounded-lg p-3">
+          <img id="api-preview" class="w-full rounded-lg border border-white/10" alt="Preview"/>
+          <div class="flex gap-2 mt-2">
+            <a id="api-open" class="btn-grad px-3 py-2 rounded-lg font-semibold text-center flex-1" target="_blank" rel="noopener">Open Image</a>
+            <button id="api-copy" class="px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition">Copy URL</button>
+            <button id="api-download" class="px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition">Download (SNS watermark)</button>
+          </div>
+          <div id="api-watermark-hint" class="text-xs text-white/60 mt-1"></div>
+        </div>
+      </div>
+
+      <!-- Local Canvas Mode -->
+      <input type="file" id="meme-upload" class="block w-full text-sm mb-3" />
+      <input id="top-text" placeholder="Top text" class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm mb-3" />
+      <input id="bottom-text" placeholder="Bottom text" class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm mb-3" />
+      <canvas id="meme-canvas" width="500" height="500" class="w-full border border-white/10 rounded-lg mb-3"></canvas>
+      <button id="download-meme" class="btn-grad px-4 py-2 rounded-lg font-semibold hover:scale-105 transition">
+        Download Meme
+      </button>
+    </section>
+  </main>
+
+  <footer class="max-w-5xl mx-auto p-6 text-xs text-white/50 text-center">
+    Built for the Webhash × .sol Buildathon · Solana Powered 🚀
+  </footer>
+
+  <!-- QR MODAL -->
+  <div id="qr-backdrop" class="hidden fixed inset-0 z-50 bg-black/60 p-4">
+    <div class="glass max-w-sm mx-auto mt-20 rounded-2xl p-5 relative">
+      <button id="qr-close" class="absolute right-3 top-3 text-white/70 hover:text-white">✕</button>
+      <h3 class="text-lg font-semibold mb-2">Scan to tip</h3>
+      <canvas id="qr-canvas" class="mx-auto rounded-lg border border-white/10 bg-white"></canvas>
+      <div class="text-xs text-white/70 mt-3 space-y-1">
+        <div>Amount: <span id="qr-amount" class="text-white font-semibold"></span> SOL</div>
+        <div>Recipient: <span id="qr-recipient" class="font-mono text-white/90"></span></div>
+      </div>
+      <div class="flex gap-2 mt-4">
+        <button id="qr-copy" class="flex-1 px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition">Copy Link</button>
+        <a id="qr-open" class="flex-1 text-center btn-grad px-3 py-2 rounded-lg font-semibold hover:scale-105 transition" target="_blank" rel="noopener">Open Wallet</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Your bundle -->
+  <script type="module" src="/src/main.ts"></script>
+  <!-- Tailwind CDN (dev only) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+</body>
+</html>
