@@ -1,29 +1,29 @@
 // vite.config.ts
-import { defineConfig } from 'vite'
-import inject from '@rollup/plugin-inject'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { defineConfig } from 'vite';
+import inject from '@rollup/plugin-inject';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url))
-const r = (p: string) => path.resolve(__dirname, p)
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const r = (p: string) => path.resolve(__dirname, p);
 
-export default defineConfig(async ({ command }) => {
-  const plugins: any[] = [
-    inject({
-      Buffer: ['buffer', 'Buffer'],
-    }),
-  ]
-
-  // No need for @vitejs/plugin-basic-ssl; skip entirely to avoid peer conflicts
+export default defineConfig(({ command }) => {
+  const isBuild = command === 'build';
 
   return {
-    plugins,
+    plugins: [
+      // Provides global Buffer in browser bundles
+      inject({
+        Buffer: ['buffer', 'Buffer'],
+      }),
+    ],
     define: {
-      'process.env': {}, // some libs check this
+      // Some deps check this; stub it for browser
+      'process.env': {},
     },
     resolve: {
       alias: {
-        // Force ANY `import 'borsh'` (including from node_modules) to use our shim
+        // Force ANY `import 'borsh'` (even inside node_modules) to use our shim
         borsh: r('src/shims/borsh.ts'),
       },
     },
@@ -31,11 +31,19 @@ export default defineConfig(async ({ command }) => {
       include: ['buffer'],
     },
     build: {
-      // make sure CJS interop is fully enabled; harmless but helpful
+      target: 'es2020', // web3.js & modern libs play nice here
+      sourcemap: !isBuild ? true : false, // set to `true` if you need prod debugging
+      minify: true, // set to false temporarily if you need readable stacks
       commonjsOptions: {
         transformMixedEsModules: true,
       },
-      sourcemap: false,
+      // treeshake: true, // (enabled by default)
     },
-  }
-})
+    server: {
+      https: false, // no @vitejs/plugin-basic-ssl needed
+    },
+    preview: {
+      https: false,
+    },
+  };
+});
