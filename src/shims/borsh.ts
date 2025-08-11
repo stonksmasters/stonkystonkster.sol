@@ -1,7 +1,19 @@
 // src/shims/borsh.ts
-// Import the real library entry (this bypasses the alias because we used an exact-match regex)
-import * as realBorsh from 'borsh/lib/index.js';
+// Make CJS borsh usable with ESM & named imports without circular aliasing.
+// We import from a deep path so the /^borsh$/ alias does not match.
 
-export const serialize = (realBorsh as any).serialize;
-export const deserialize = (realBorsh as any).deserialize;
-export const deserializeUnchecked = (realBorsh as any).deserializeUnchecked;
+// @ts-ignore deep path is intentional
+import * as real from 'borsh/lib/index.js'; 
+
+const b: any = (real as any).default ?? real;
+
+export const {
+  serialize,
+  deserialize,
+  deserializeUnchecked,
+  BinaryReader,
+  BinaryWriter,
+} = b;
+
+// So `import borsh from 'borsh'` also works after aliasing:
+export default b;

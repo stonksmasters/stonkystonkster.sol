@@ -2,161 +2,287 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>.sol Tip Jar + Meme Shrine</title>
+  <meta name="theme-color" content="#0b1020" />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="description" content="Tip .sol domains, swap via Jupiter, and create/download memes — no servers required." />
+  <meta property="og:title" content=".sol Tip Jar + Meme Shrine" />
+  <meta property="og:description" content="Tip, swap, and meme — fully client-side web3." />
+  <meta property="og:type" content="website" />
 
-  <!-- Jupiter Plugin v1 -->
-  <script defer src="https://plugin.jup.ag/plugin-v1.js"></script>
-
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <!-- silence favicon 404 -->
+  <!-- Favicon (silence 404) -->
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22/>" />
+
+  <!-- Fonts (Inter) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet" />
 
   <!-- Optional: preconnects for faster first RPC call -->
   <link rel="preconnect" href="https://api.mainnet-beta.solana.com" />
   <link rel="preconnect" href="https://mainnet.helius-rpc.com" />
 
-  <!-- Runtime env fallback: only used if import.meta.env isn't present (e.g. raw source on IPFS). -->
+  <!-- Jupiter Plugin v1 -->
+  <script defer src="https://plugin.jup.ag/plugin-v1.js"></script>
+
+  <!-- Tailwind CDN (swap for PostCSS build later) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Runtime env fallback for gateway/IPFS builds -->
   <script>
     window.__ENV__ = Object.assign({}, window.__ENV__ || {}, {
-      VITE_DEFAULT_CLUSTER: 'mainnet',
-      VITE_OWNER_SOL_DOMAIN: 'stonkystonkster.sol',
-      VITE_OWNER_WALLET: 'HeGffZqFhB9euhind4aJFWy8waLCppTkie4gvW8bQhzp',
-      // Put your real Helius key here or keep public fallback second
-      VITE_RPC_MAINNET: 'https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY,https://api.mainnet-beta.solana.com'
+      VITE_DEFAULT_CLUSTER: "%VITE_DEFAULT_CLUSTER%",
+      VITE_OWNER_SOL_DOMAIN: "%VITE_OWNER_SOL_DOMAIN%",
+      VITE_OWNER_WALLET: "%VITE_OWNER_WALLET%",
+      VITE_RPC_MAINNET: "%VITE_RPC_MAINNET%",
+      VITE_RPC_DEVNET: "%VITE_RPC_DEVNET%"
     });
   </script>
 
   <style>
-    :root {
-      /* Jupiter Plugin theme (tweak as you like) */
-      --jupiter-plugin-primary: 153, 69, 255;       /* #9945FF */
-      --jupiter-plugin-background: 11, 16, 32;      /* #0b1020 */
-      --jupiter-plugin-primary-text: 232, 249, 255; /* near-white */
-      --jupiter-plugin-warning: 251, 191, 36;       /* amber */
-      --jupiter-plugin-interactive: 20, 241, 149;   /* #14F195 */
-      --jupiter-plugin-module: 25, 36, 61;          /* panel bg-ish */
+    :root{
+      /* Design tokens */
+      --bg-deep:#0b1020;
+      --fg:#e8f9ff;
+      --muted:rgba(232,249,255,0.7);
+      --glass:rgba(255,255,255,0.06);
+      --glass-border:rgba(255,255,255,0.12);
+      --grad-a:#9945FF; /* Solana purple */
+      --grad-b:#14F195; /* Solana green */
+      --brand:#9a6bff;
+
+      /* Jupiter plugin overridables */
+      --jupiter-plugin-primary: 153, 69, 255;
+      --jupiter-plugin-background: 11, 16, 32;
+      --jupiter-plugin-primary-text: 232, 249, 255;
+      --jupiter-plugin-warning: 251, 191, 36;
+      --jupiter-plugin-interactive: 20, 241, 149;
+      --jupiter-plugin-module: 25, 36, 61;
     }
 
-    body {
-      background:
-        radial-gradient(1000px 600px at 20% 10%, #0ea5e9 0%, transparent 50%),
-        radial-gradient(900px 500px at 90% 10%, #22c55e 0%, transparent 50%),
-        radial-gradient(800px 500px at 50% 100%, #a78bfa 0%, transparent 50%),
-        #0b1020;
+    html,body{height:100%}
+    body{
+      background:radial-gradient(1200px 600px at 15% 10%, rgba(20,241,149,.15) 0%, transparent 55%),
+                 radial-gradient(1000px 520px at 85% 5%, rgba(153,69,255,.15) 0%, transparent 60%),
+                 radial-gradient(900px 520px at 50% 105%, rgba(14,165,233,.18) 0%, transparent 60%),
+                 var(--bg-deep);
+      color:var(--fg);
       font-family: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
-      color: #fff;
     }
-    .glass { background: rgba(255,255,255,0.05); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.10); }
-    .btn-grad { background: linear-gradient(90deg, #9945FF, #14F195); background-size: 200% 200%; animation: gradientShift 4s ease infinite; }
-    @keyframes gradientShift { 0%{background-position:0% 50%} 50%{background-position:100% 50%} 100%{background-position:0% 50%} }
+
+    /* Subtle animated mesh */
+    .mesh:before{
+      content:""; position:fixed; inset:-20vmax; pointer-events:none; z-index:-1;
+      background: conic-gradient(from 180deg, rgba(153,69,255,.08), rgba(20,241,149,.06), rgba(14,165,233,.07), rgba(153,69,255,.08));
+      filter:blur(80px) saturate(120%);
+      animation: spin 40s linear infinite;
+    }
+    @keyframes spin{to{transform:rotate(360deg)}}
+    @media (prefers-reduced-motion: reduce){ .mesh:before{animation:none} }
+
+    .glass{background:var(--glass); backdrop-filter: blur(14px); border:1px solid var(--glass-border)}
+    .btn-grad{ background:linear-gradient(90deg, var(--grad-a), var(--grad-b)); background-size:200% 200%; animation:gradientShift 6s ease infinite }
+    @keyframes gradientShift{0%{background-position:0% 50%}50%{background-position:100% 50%}100%{background-position:0% 50%}}
+
+    /* Neon border on focus/hover */
+    .focus-glow:focus, .focus-glow:hover{ outline:none; box-shadow:0 0 0 2px rgba(153,69,255,.35), 0 0 0 6px rgba(20,241,149,.2) }
+
+    /* Snacky tooltip (pure CSS) */
+    [data-tip]{ position:relative }
+    [data-tip]:after{ content:attr(data-tip); position:absolute; right:0; bottom:calc(100% + 6px);
+      background:rgba(17,24,39,.9); color:#fff; font-size:11px; padding:6px 8px; border-radius:8px;
+      opacity:0; transform:translateY(6px); pointer-events:none; transition:.2s; white-space:nowrap }
+    [data-tip]:hover:after{ opacity:1; transform:none }
+
+    /* Floating action button → scroll to JUP */
+    #swap-fab{ position:fixed; right:18px; bottom:18px; z-index:50; border:1px solid var(--glass-border);
+      background:rgba(153,69,255,.18); backdrop-filter: blur(10px) saturate(120%); }
+    #swap-fab .ring{ position:absolute; inset:-8px; border-radius:9999px; border:2px solid rgba(20,241,149,.5);
+      animation:pulse 2s ease-out infinite; pointer-events:none }
+    @keyframes pulse{ 0%{opacity:.8; transform:scale(.9)} 70%{opacity:0; transform:scale(1.3)} 100%{opacity:0} }
+
+    /* JUP callout inside card (non-interactive overlay) */
+    .jup-callout{ position:absolute; right:12px; bottom:12px; pointer-events:none; display:flex; align-items:center; gap:8px; opacity:.9 }
+    .jup-callout .arrow{ filter: drop-shadow(0 0 6px rgba(153,69,255,.6)) }
+
+    /* Cards */
+    .card{ border-radius:16px; box-shadow: 0 10px 30px rgba(0,0,0,.35) }
+      /* Jupiter widget theming + readability */
+    :root{
+      /* Higher-contrast text + slightly darker modules for legibility */
+      --jupiter-plugin-primary: 157, 92, 255;        /* softer purple */
+      --jupiter-plugin-primary-text: 248, 252, 255;  /* brighter text */
+      --jupiter-plugin-background: 10, 14, 28;       /* deeper bg */
+      --jupiter-plugin-module: 18, 26, 48;           /* darker panels */
+      --jupiter-plugin-warning: 255, 196, 38;
+      --jupiter-plugin-interactive: 20, 241, 149;    /* keep Solana green */
+    }
+
+    /* Visually blend the Jupiter iframe with our glass UI */
+    .jup-surface{ border-radius:16px; border:1px solid var(--glass-border); background:rgba(255,255,255,0.035); backdrop-filter: blur(10px) saturate(120%); padding:8px; }
+    #jup-widget iframe{ display:block; width:100% !important; min-height:552px; border:1px solid var(--glass-border); border-radius:12px; background:rgba(11,16,32,0.96); filter:contrast(1.05) saturate(1.05); box-shadow: 0 8px 30px rgba(0,0,0,.35); }
   </style>
 </head>
-<body class="text-white">
-  <header class="max-w-5xl mx-auto p-6 flex justify-between items-center">
-    <h1 class="text-2xl font-bold tracking-tight">.sol Tip Jar + Meme Shrine</h1>
-    <button id="connect-wallet" class="btn-grad px-4 py-2 rounded-lg font-semibold hover:scale-105 transition">
-      Connect Wallet
-    </button>
+<body class="mesh text-white">
+  <!-- Top bar -->
+  <header class="max-w-6xl mx-auto p-6 flex justify-between items-center">
+    <a href="#" class="group inline-flex items-center gap-2">
+      <span class="inline-block h-6 w-6 rounded bg-gradient-to-br from-[#9945FF] to-[#14F195] blur-[1px]"></span>
+      <h1 class="text-xl md:text-2xl font-extrabold tracking-tight">
+        <span class="bg-gradient-to-r from-[#c4b5fd] to-[#99f6e4] bg-clip-text text-transparent">.sol Tip Jar</span>
+        <span class="text-white/70"> + Meme Shrine</span>
+      </h1>
+    </a>
+    <nav class="hidden md:flex items-center gap-5 text-sm text-white/70">
+      <a href="#tip-jar" class="hover:text-white">Tip</a>
+      <a href="#meme" class="hover:text-white">Meme</a>
+      <a href="#swap" class="hover:text-white">Swap</a>
+    </nav>
+    <div class="flex items-center gap-2">
+      <span id="cluster-pill" class="hidden md:inline-block text-xs px-2 py-1 rounded border border-white/15 text-white/70">—</span>
+      <button id="connect-wallet" class="btn-grad px-4 py-2 rounded-lg font-semibold hover:scale-[1.03] transition focus-glow" data-tip="Connect Phantom">
+        Connect Wallet
+      </button>
+    </div>
   </header>
 
-  <main class="max-w-5xl mx-auto p-6 grid gap-6 md:grid-cols-2">
-    <!-- Tip Jar Card -->
-    <section class="glass rounded-xl p-6 shadow-lg">
+  <!-- Hero -->
+  <section class="max-w-6xl mx-auto px-6 pb-2">
+    <div class="rounded-2xl glass card p-6 md:p-8">
+      <div class="grid md:grid-cols-2 gap-8">
+        <div>
+          <h2 class="text-2xl md:text-3xl font-extrabold leading-tight">Tip <span id="owner-sol" class="text-[#14F195]">—</span>, swap seamlessly, and mint memes — all client‑side.</h2>
+          <p class="mt-3 text-white/70">No servers. Just your wallet, Solana Pay deep links, Jupiter swaps, and a playful meme canvas.</p>
+          <div class="mt-5 flex flex-wrap gap-2">
+            <button class="tip-btn btn-grad px-3 py-2 rounded-md text-sm font-semibold" data-amount="0.05">Tip 0.05 SOL</button>
+            <button class="tip-btn btn-grad px-3 py-2 rounded-md text-sm font-semibold" data-amount="0.1">0.1</button>
+            <button class="tip-btn btn-grad px-3 py-2 rounded-md text-sm font-semibold" data-amount="0.5">0.5</button>
+            <button class="tip-btn btn-grad px-3 py-2 rounded-md text-sm font-semibold" data-amount="1">1</button>
+          </div>
+        </div>
+        <div class="grid gap-3 content-start">
+          <label class="text-sm text-white/70">Custom amount (SOL)</label>
+          <div class="flex gap-2">
+            <input id="custom-tip" type="number" step="0.001" min="0" placeholder="e.g., 0.069" class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm focus-glow" />
+            <button id="qr-tip" class="px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition focus-glow" data-tip="Show QR / Mobile deep link">QR</button>
+          </div>
+          <ul id="tip-feed" class="space-y-2 text-sm mt-2" aria-live="polite"></ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <main class="max-w-6xl mx-auto p-6 grid gap-6 md:grid-cols-2" id="content">
+    <!-- Tip Jar Card (details) -->
+    <section id="tip-jar" class="glass card rounded-xl p-6">
       <div class="flex items-center justify-between mb-4">
-        <h2 class="text-xl font-semibold">💸 Tip Jar</h2>
-        <span class="text-xs text-white/70">to <span id="owner-sol" class="text-green-400 font-semibold"></span></span>
+        <h3 class="text-lg font-semibold">💸 Tip Jar</h3>
+        <div class="flex items-center gap-2 text-xs text-white/70">
+          <span>to</span> <span id="owner-sol-inline" class="text-[#14F195] font-semibold"></span>
+        </div>
       </div>
 
       <div class="flex flex-wrap gap-2 mb-4">
-        <button class="tip-btn btn-grad px-3 py-1 rounded-md text-sm font-semibold" data-amount="0.05">0.05 SOL</button>
-        <button class="tip-btn btn-grad px-3 py-1 rounded-md text-sm font-semibold" data-amount="0.1">0.1 SOL</button>
-        <button class="tip-btn btn-grad px-3 py-1 rounded-md text-sm font-semibold" data-amount="0.5">0.5 SOL</button>
-        <button class="tip-btn btn-grad px-3 py-1 rounded-md text-sm font-semibold" data-amount="1">1 SOL</button>
+        <button class="tip-btn btn-grad px-3 py-1.5 rounded-md text-sm font-semibold" data-amount="0.05">0.05</button>
+        <button class="tip-btn btn-grad px-3 py-1.5 rounded-md text-sm font-semibold" data-amount="0.1">0.1</button>
+        <button class="tip-btn btn-grad px-3 py-1.5 rounded-md text-sm font-semibold" data-amount="0.5">0.5</button>
+        <button class="tip-btn btn-grad px-3 py-1.5 rounded-md text-sm font-semibold" data-amount="1">1</button>
       </div>
 
       <div class="flex gap-2 mb-4">
-        <input id="custom-tip" type="number" step="0.001" min="0" placeholder="Custom amount (SOL)"
-               class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm" />
-        <button id="qr-tip" class="px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition">
+        <input id="custom-tip-inline" type="number" step="0.001" min="0" placeholder="Custom amount (SOL)"
+               class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm focus-glow" />
+        <button id="qr-tip-inline" class="px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition focus-glow">
           Pay via QR
         </button>
       </div>
 
-      <ul id="tip-feed" class="space-y-2 text-sm"></ul>
+      <ul id="tip-feed-inline" class="space-y-2 text-sm" aria-live="polite"></ul>
 
       <!-- JUP SWAP embedded inside the Tip Jar card -->
       <hr class="border-white/10 my-4">
-      <div class="mt-2">
+      <div class="mt-2 relative" id="swap">
         <div class="flex items-center justify-between mb-2">
-          <h3 class="text-sm text-white/70">Swap to SOL (via Jupiter)</h3>
-          <span class="text-[11px] text-white/50" id="jup-cluster-label">mainnet</span>
+          <h4 class="text-sm text-white/70">Swap to SOL (via Jupiter)</h4>
+          <span class="text-[11px] text-white/50" id="jup-cluster-label">—</span>
         </div>
-        <!-- Jupiter Plugin target -->
-        <div id="jup-widget" class="rounded-xl overflow-hidden" style="width:100%; min-height:568px;"></div>
+        <div class="relative jup-surface">
+          <div id="jup-widget" style="width:100%; min-height:568px;"></div>
+          <!-- Non-blocking hint pinned to the widget's bottom-right corner -->
+          <div class="jup-callout" aria-hidden="true">
+            <svg class="arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 17L17 7"/><path d="M7 7h10v10"/></svg>
+            <span class="text-xs bg-black/50 border border-white/10 px-2 py-1 rounded">Click inside to swap</span>
+          </div>
+        </div>
       </div>
     </section>
 
     <!-- Meme Shrine Card -->
-    <section class="glass rounded-xl p-6 shadow-lg">
-      <h2 class="text-xl font-semibold mb-4">🖼️ Meme Shrine</h2>
+    <section id="meme" class="glass card rounded-xl p-6">
+      <h3 class="text-lg font-semibold mb-4">🖼️ Meme Shrine</h3>
 
-      <!-- Mode toggle -->
       <div class="mb-3">
         <div class="flex items-center gap-2 text-sm">
-          <button id="mode-api" class="px-3 py-1 rounded-md border border-white/15 bg-white/10 hover:bg-white/15 transition">API Templates</button>
-          <button id="mode-local" class="px-3 py-1 rounded-md border border-white/15 bg-white/5 hover:bg-white/10 transition">Upload (Canvas)</button>
+          <button id="mode-api" class="px-3 py-1 rounded-md border border-white/15 bg-white/10 hover:bg-white/15 transition focus-glow">API Templates</button>
+          <button id="mode-local" class="px-3 py-1 rounded-md border border-white/15 bg-white/5 hover:bg-white/10 transition focus-glow">Upload (Canvas)</button>
         </div>
       </div>
 
-      <!-- API Templates Mode -->
       <div id="api-mode" class="space-y-3 hidden">
         <div class="flex items-center justify-between">
-          <h3 class="text-sm text-white/70">Popular Templates (live)</h3>
-          <input id="template-search" placeholder="Search…" class="bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-sm" />
+          <h4 class="text-sm text-white/70">Popular Templates (live)</h4>
+          <input id="template-search" placeholder="Search…" class="bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-sm focus-glow" />
         </div>
 
         <div id="api-templates" class="grid grid-cols-3 md:grid-cols-5 gap-2"></div>
         <div id="api-pager" class="flex items-center justify-between text-xs text-white/70">
-          <button id="api-prev" class="px-3 py-1 rounded-md border border-white/15 bg-white/10 hover:bg-white/15 transition">Prev</button>
+          <button id="api-prev" class="px-3 py-1 rounded-md border border-white/15 bg-white/10 hover:bg-white/15 transition focus-glow">Prev</button>
           <div><span id="api-page">1</span> / <span id="api-pages">1</span></div>
-          <button id="api-next" class="px-3 py-1 rounded-md border border-white/15 bg-white/10 hover:bg-white/15 transition">Next</button>
+          <button id="api-next" class="px-3 py-1 rounded-md border border-white/15 bg-white/10 hover:bg-white/15 transition focus-glow">Next</button>
         </div>
 
         <div class="grid md:grid-cols-2 gap-2">
-          <input id="api-top"    placeholder="Top text"    class="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm" />
-          <input id="api-bottom" placeholder="Bottom text" class="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm" />
+          <input id="api-top"    placeholder="Top text"    class="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm focus-glow" />
+          <input id="api-bottom" placeholder="Bottom text" class="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm focus-glow" />
         </div>
 
         <div class="glass rounded-lg p-3">
           <img id="api-preview" class="w-full rounded-lg border border-white/10" alt="Preview"/>
           <div class="flex gap-2 mt-2">
             <a id="api-open" class="btn-grad px-3 py-2 rounded-lg font-semibold text-center flex-1" target="_blank" rel="noopener">Open Image</a>
-            <button id="api-copy" class="px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition">Copy URL</button>
-            <button id="api-download" class="px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition">Download (SNS watermark)</button>
+            <button id="api-copy" class="px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition focus-glow">Copy URL</button>
+            <button id="api-download" class="px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition focus-glow">Download (SNS watermark)</button>
           </div>
           <div id="api-watermark-hint" class="text-xs text-white/60 mt-1"></div>
         </div>
       </div>
 
-      <!-- Local Canvas Mode -->
       <input type="file" id="meme-upload" class="block w-full text-sm mb-3" />
-      <input id="top-text" placeholder="Top text" class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm mb-3" />
-      <input id="bottom-text" placeholder="Bottom text" class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm mb-3" />
+      <input id="top-text" placeholder="Top text" class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm mb-3 focus-glow" />
+      <input id="bottom-text" placeholder="Bottom text" class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm mb-3 focus-glow" />
       <canvas id="meme-canvas" width="500" height="500" class="w-full border border-white/10 rounded-lg mb-3"></canvas>
-      <button id="download-meme" class="btn-grad px-4 py-2 rounded-lg font-semibold hover:scale-105 transition">
+      <button id="download-meme" class="btn-grad px-4 py-2 rounded-lg font-semibold hover:scale-105 transition focus-glow">
         Download Meme
       </button>
     </section>
   </main>
 
-  <footer class="max-w-5xl mx-auto p-6 text-xs text-white/50 text-center">
+  <footer class="max-w-6xl mx-auto p-6 text-xs text-white/50 text-center">
     Built for the Webhash × .sol Buildathon · Solana Powered 🚀
   </footer>
+
+  <!-- Swap FAB: gently guides users to the Jupiter section -->
+  <button id="swap-fab" class="hidden md:flex items-center gap-2 px-4 py-3 rounded-full glass text-sm shadow-lg hover:shadow-xl transition">
+    <span class="ring"></span>
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18"/><path d="M17 7l5 5-5 5"/></svg>
+    <span class="font-semibold">Swap with Jupiter</span>
+  </button>
 
   <!-- QR MODAL -->
   <div id="qr-backdrop" class="hidden fixed inset-0 z-50 bg-black/60 p-4">
     <div class="glass max-w-sm mx-auto mt-20 rounded-2xl p-5 relative">
-      <button id="qr-close" class="absolute right-3 top-3 text-white/70 hover:text-white">✕</button>
+      <button id="qr-close" class="absolute right-3 top-3 text-white/70 hover:text-white focus-glow">✕</button>
       <h3 class="text-lg font-semibold mb-2">Scan to tip</h3>
       <canvas id="qr-canvas" class="mx-auto rounded-lg border border-white/10 bg-white"></canvas>
       <div class="text-xs text-white/70 mt-3 space-y-1">
@@ -164,16 +290,32 @@
         <div>Recipient: <span id="qr-recipient" class="font-mono text-white/90"></span></div>
       </div>
       <div class="flex gap-2 mt-4">
-        <button id="qr-copy" class="flex-1 px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition">Copy Link</button>
-        <a id="qr-open" class="flex-1 text-center btn-grad px-3 py-2 rounded-lg font-semibold hover:scale-105 transition" target="_blank" rel="noopener">Open Wallet</a>
+        <button id="qr-copy" class="flex-1 px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition focus-glow">Copy Link</button>
+        <a id="qr-open" class="flex-1 text-center btn-grad px-3 py-2 rounded-lg font-semibold hover:scale-105 transition focus-glow" target="_blank" rel="noopener">Open Wallet</a>
       </div>
     </div>
   </div>
 
-  <!-- Your bundle (Vite rewrites this to /assets/index-*.js during build) -->
+  <!-- Entry (NOTE: set to `/main.ts` if you keep root layout; change to `/src/main.ts` if you moved) -->
   <script type="module" src="/src/main.ts"></script>
 
-  <!-- Tailwind CDN (we keep it for now; warning in console is harmless without a PostCSS pipeline) -->
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Tiny UX helpers kept here to avoid touching your TS bundle -->
+  <script>
+    // Cluster pill from env (non-authoritative; your TS sets the true label inside the widget card)
+    (function(){
+      const pill = document.getElementById('cluster-pill');
+      const cluster = (window.__ENV__ && window.__ENV__.VITE_DEFAULT_CLUSTER) || 'mainnet';
+      if(pill){ pill.textContent = cluster; pill.style.display = 'inline-block'; }
+    })();
+
+    // Swap FAB scrolls to the JUP widget; shown when viewport is wide enough
+    (function(){
+      const fab = document.getElementById('swap-fab');
+      const jup = document.getElementById('jup-widget');
+      if(!fab || !jup) return;
+      fab.classList.remove('hidden');
+      fab.addEventListener('click', () => jup.scrollIntoView({behavior:'smooth', block:'start'}));
+    })();
+  </script>
 </body>
 </html>
