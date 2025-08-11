@@ -60,14 +60,15 @@
       --jupiter-plugin-interactive: 20, 241, 149;
       --jupiter-plugin-warning: 251, 191, 36;
     }
+
     @media (max-width: 420px){
-  header { padding: 12px !important; }
-  .card { border-radius: 12px; padding: 12px !important; }
-  h1, .text-2xl { font-size: 1.125rem !important; }
-  #jup-widget iframe { min-height: 520px !important; }
-  .btn-grad { animation-duration: 9s; } /* calmer */
-}
-html, body { overscroll-behavior-y: contain; } /* prevents rubber-band + bounce loops */
+      header { padding: 12px !important; }
+      .card { border-radius: 12px; padding: 12px !important; }
+      h1, .text-2xl { font-size: 1.125rem !important; }
+      #jup-widget iframe { min-height: 520px !important; }
+      .btn-grad { animation-duration: 9s; } /* calmer */
+    }
+    html, body { overscroll-behavior-y: contain; } /* prevents rubber-band + bounce loops */
 
     html,body{height:100%}
     body{
@@ -104,8 +105,12 @@ html, body { overscroll-behavior-y: contain; } /* prevents rubber-band + bounce 
     [data-tip]:hover:after{ opacity:1; transform:none }
 
     /* Floating action button → scroll to JUP */
-    #swap-fab{ position:fixed; right:18px; bottom:18px; z-index:50; border:1px solid var(--glass-border);
-      background:rgba(153,69,255,.18); backdrop-filter: blur(10px) saturate(120%); }
+    #swap-fab{
+      position:fixed; right:18px; bottom:18px; z-index:50;
+      border:1px solid var(--glass-border);
+      background:rgba(153,69,255,.18); backdrop-filter: blur(10px) saturate(120%);
+      transition: opacity .2s ease;
+    }
     #swap-fab .ring{ position:absolute; inset:-8px; border-radius:9999px; border:2px solid rgba(20,241,149,.5);
       animation:pulse 2s ease-out infinite; pointer-events:none }
     @keyframes pulse{ 0%{opacity:.8; transform:scale(.9)} 70%{opacity:0; transform:scale(1.3)} 100%{opacity:0} }
@@ -117,27 +122,26 @@ html, body { overscroll-behavior-y: contain; } /* prevents rubber-band + bounce 
     /* Cards */
     .card{ border-radius:16px; box-shadow: 0 10px 30px rgba(0,0,0,.35) }
 
-    /* Jupiter section: remove color wash, improve edge contrast */
+    /* Jupiter section visuals */
     .jup-surface{
       position:relative; border-radius:16px;
-      border:1px solid rgba(255,255,255,0.18); /* stronger edge for separation */
-      background:rgba(6,10,22,0.6);            /* a hair darker behind the iframe */
+      border:1px solid rgba(255,255,255,0.18);
+      background:rgba(6,10,22,0.6);
       backdrop-filter: blur(10px) saturate(120%); padding:8px;
       box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 10px 28px rgba(0,0,0,0.35);
+      /* Ensure nothing overlaps bottom controls on mobile (safe-area aware) */
+      padding-bottom: max(8px, env(safe-area-inset-bottom));
     }
-    /* The iframe itself (can’t restyle inside, but we keep it crisp) */
     #jup-widget iframe{
       display:block; width:100% !important; min-height:552px;
-      border:1px solid rgba(255,255,255,0.22); /* higher-contrast frame */
+      border:1px solid rgba(255,255,255,0.22);
       border-radius:12px; background:transparent;
       box-shadow: 0 8px 26px rgba(0,0,0,.35);
-      filter: saturate(1.0) contrast(1.0); /* remove extra processing for sharp text */
+      filter: saturate(1.0) contrast(1.0);
     }
 
-    /* Remove the previous soft-light brand wash to keep text crisp */
     .jup-tint{ display:none; }
 
-    /* Callout pill more legible */
     .jup-callout span{
       font-size:12px; line-height:1;
       background:rgba(0,0,0,0.6);
@@ -146,7 +150,6 @@ html, body { overscroll-behavior-y: contain; } /* prevents rubber-band + bounce 
       backdrop-filter: blur(4px);
     }
 
-    /* Gentle one-time attention for the callout */
     .jup-callout{ color:#fff; animation: jupPulse 3s ease 1; }
     .jup-callout .arrow{ opacity: 0.9; transform: translateY(1px); }
     @keyframes jupPulse{
@@ -156,6 +159,11 @@ html, body { overscroll-behavior-y: contain; } /* prevents rubber-band + bounce 
       100%{ transform: translateY(0); opacity: 1; }
     }
     @media (prefers-reduced-motion: reduce){ .jup-callout{ animation:none } }
+
+    /* Hide the FAB on small screens */
+    @media (max-width: 767.98px){
+      #swap-fab { display: none !important; }
+    }
   </style>
 </head>
 <body class="mesh text-white">
@@ -207,61 +215,10 @@ html, body { overscroll-behavior-y: contain; } /* prevents rubber-band + bounce 
     </div>
   </section>
 
+  <!-- CONTENT GRID: Meme first, Tip Jar second -->
   <main class="max-w-6xl mx-auto p-6 grid gap-6 md:grid-cols-2" id="content">
-    <!-- Tip Jar Card (details) -->
-    <section id="tip-jar" class="glass card rounded-xl p-6">
-      <div class="flex items-center justify-between mb-4">
-        <h3 class="text-lg font-semibold">💸 Tip Jar</h3>
-        <div class="flex items-center gap-2 text-xs text-white/70">
-          <span>to</span> <span id="owner-sol-inline" class="text-[#14F195] font-semibold"></span>
-        </div>
-      </div>
 
-      <div class="flex flex-wrap gap-2 mb-4">
-        <button class="tip-btn btn-grad px-3 py-1.5 rounded-md text-sm font-semibold" data-amount="0.05">0.05</button>
-        <button class="tip-btn btn-grad px-3 py-1.5 rounded-md text-sm font-semibold" data-amount="0.1">0.1</button>
-        <button class="tip-btn btn-grad px-3 py-1.5 rounded-md text-sm font-semibold" data-amount="0.5">0.5</button>
-        <button class="tip-btn btn-grad px-3 py-1.5 rounded-md text-sm font-semibold" data-amount="1">1</button>
-      </div>
-
-      <div class="flex gap-2 mb-4">
-        <input id="custom-tip-inline" type="number" step="0.001" min="0" placeholder="Custom amount (SOL)"
-               class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm focus-glow" />
-        <button id="qr-tip-inline" class="px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition focus-glow">
-          Pay via QR
-        </button>
-      </div>
-
-      <ul id="tip-feed-inline" class="space-y-2 text-sm" aria-live="polite"></ul>
-
-      <!-- JUP SWAP embedded inside the Tip Jar card -->
-      <hr class="border-white/10 my-4">
-      <div class="mt-2" id="swap">
-        <div class="flex items-center justify-between mb-2">
-          <h4 class="text-sm font-medium text-white/85">Swap to SOL (via Jupiter)</h4>
-          <span class="text-[11px] text-white/60" id="jup-cluster-label">—</span>
-        </div>
-
-        <div class="relative rounded-xl overflow-hidden jup-surface">
-          <!-- The Jupiter widget mounts here -->
-          <div id="jup-widget" class="w-full min-h-[568px]"></div>
-
-          <!-- Brand tint removed for readability. Keep this element if you ever want it back. -->
-          <div class="jup-tint" aria-hidden="true"></div>
-
-          <!-- Non-blocking hint pinned to the widget's bottom-right corner -->
-          <div class="pointer-events-none absolute bottom-3 right-3 flex items-center gap-1.5 jup-callout" aria-hidden="true">
-            <svg class="arrow" width="18" height="18" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M7 17L17 7"/><path d="M7 7h10v10"/>
-            </svg>
-            <span>Click inside to swap</span>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- Meme Shrine Card -->
+    <!-- Meme Shrine FIRST (left on desktop, first on mobile) -->
     <section id="meme" class="glass card rounded-xl p-6">
       <h3 class="text-lg font-semibold mb-4">🖼️ Meme Shrine</h3>
 
@@ -309,13 +266,59 @@ html, body { overscroll-behavior-y: contain; } /* prevents rubber-band + bounce 
         Download Meme
       </button>
     </section>
+
+    <!-- Tip Jar SECOND (right on desktop, second on mobile) -->
+    <section id="tip-jar" class="glass card rounded-xl p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-lg font-semibold">💸 Tip Jar</h3>
+        <div class="flex items-center gap-2 text-xs text-white/70">
+          <span>to</span> <span id="owner-sol-inline" class="text-[#14F195] font-semibold"></span>
+        </div>
+      </div>
+
+      <div class="flex flex-wrap gap-2 mb-4">
+        <button class="tip-btn btn-grad px-3 py-1.5 rounded-md text-sm font-semibold" data-amount="0.05">0.05</button>
+        <button class="tip-btn btn-grad px-3 py-1.5 rounded-md text-sm font-semibold" data-amount="0.1">0.1</button>
+        <button class="tip-btn btn-grad px-3 py-1.5 rounded-md text-sm font-semibold" data-amount="0.5">0.5</button>
+        <button class="tip-btn btn-grad px-3 py-1.5 rounded-md text-sm font-semibold" data-amount="1">1</button>
+      </div>
+
+      <div class="flex gap-2 mb-4">
+        <input id="custom-tip-inline" type="number" step="0.001" min="0" placeholder="Custom amount (SOL)"
+               class="w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm focus-glow" />
+        <button id="qr-tip-inline" class="px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition focus-glow">
+          Pay via QR
+        </button>
+      </div>
+
+      <ul id="tip-feed-inline" class="space-y-2 text-sm" aria-live="polite"></ul>
+
+      <!-- JUP SWAP embedded inside the Tip Jar card -->
+      <hr class="border-white/10 my-4">
+      <div class="mt-2" id="swap">
+        <div class="flex items-center justify-between mb-2">
+          <h4 class="text-sm font-medium text-white/85">Swap to SOL (via Jupiter)</h4>
+          <span class="text-[11px] text-white/60" id="jup-cluster-label">—</span>
+        </div>
+
+        <div class="relative rounded-xl overflow-hidden jup-surface">
+          <!-- The Jupiter widget mounts here -->
+          <div id="jup-widget" class="w-full min-h-[568px]"></div>
+
+          <!-- Brand tint removed for readability. Keep this element if you ever want it back. -->
+          <div class="jup-tint" aria-hidden="false"></div>
+
+        </div>
+      </div>
+    </section>
+
   </main>
 
   <footer class="max-w-6xl mx-auto p-6 text-xs text-white/50 text-center">
     Built for the Webhash × .sol Buildathon · Solana Powered 🚀
   </footer>
 
-  <!-- Swap FAB: gently guides users to the Jupiter section -->
+  <!-- Swap FAB: desktop-only helper -->
   <button id="swap-fab" class="hidden md:flex items-center gap-2 px-4 py-3 rounded-full glass text-sm shadow-lg hover:shadow-xl transition">
     <span class="ring"></span>
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18"/><path d="M17 7l5 5-5 5"/></svg>
@@ -339,10 +342,10 @@ html, body { overscroll-behavior-y: contain; } /* prevents rubber-band + bounce 
     </div>
   </div>
 
-  <!-- Entry (NOTE: set to `/main.ts` if you keep root layout; change to `/src/main.ts` if you moved) -->
+  <!-- Entry -->
   <script type="module" src="/src/main.ts"></script>
 
-  <!-- Tiny UX helpers kept here to avoid touching your TS bundle -->
+  <!-- UX helpers -->
   <script>
     // Cluster pill from env (non-authoritative; your TS sets the true label inside the widget card)
     (function(){
@@ -351,62 +354,81 @@ html, body { overscroll-behavior-y: contain; } /* prevents rubber-band + bounce 
       if(pill){ pill.textContent = cluster; pill.style.display = 'inline-block'; }
     })();
 
-    // Swap FAB scrolls to the JUP widget; shown when viewport is wide enough
+    // Swap FAB: desktop-only + hide while the Jupiter widget is visible
     (function(){
       const fab = document.getElementById('swap-fab');
       const jup = document.getElementById('jup-widget');
       if(!fab || !jup) return;
-      fab.classList.remove('hidden');
+
+      const mq = window.matchMedia('(min-width: 768px)');
+      function setDesktopVisibility() {
+        fab.style.display = mq.matches ? 'flex' : 'none';
+        if (!mq.matches) {
+          fab.style.opacity = '0';
+          fab.style.pointerEvents = 'none';
+        } else {
+          fab.style.opacity = '1';
+          fab.style.pointerEvents = 'auto';
+        }
+      }
+      setDesktopVisibility();
+      if (mq.addEventListener) mq.addEventListener('change', setDesktopVisibility);
+      else mq.addListener(setDesktopVisibility); // Safari fallback
+
       fab.addEventListener('click', () => jup.scrollIntoView({behavior:'smooth', block:'start'}));
+
+      if ('IntersectionObserver' in window){
+        const io = new IntersectionObserver((entries)=>{
+          for (const e of entries){
+            if (e.target !== jup) continue;
+            const mostlyVisible = e.isIntersecting && e.intersectionRatio > 0.6;
+            if (mostlyVisible){
+              fab.style.opacity = '0';
+              fab.style.pointerEvents = 'none';
+            } else if (mq.matches){
+              fab.style.opacity = '1';
+              fab.style.pointerEvents = 'auto';
+            }
+          }
+        }, { threshold: [0, 0.6, 1] });
+        io.observe(jup);
+      }
     })();
   </script>
+
+  <!-- iFrame height reporter (for Webhash embedding) -->
   <script>
-  // Debounced, low-churn height reporter
-  (function () {
-    const MIN_DELTA = 8;
-    let last = 0, raf = 0, pending = false;
+    (function () {
+      const MIN_DELTA = 8;
+      let last = 0, raf = 0, pending = false;
 
-    function currentHeight() {
-      // robust doc height
-      const d = document.documentElement, b = document.body;
-      return Math.max(d.scrollHeight, b.scrollHeight, d.offsetHeight, b.offsetHeight);
-    }
-
-    function post(h) {
-      h = Math.ceil(h);
-      if (Math.abs(h - last) < MIN_DELTA) return;
-      last = h;
-      parent.postMessage({ __STONKY_RESIZE__: true, height: h }, '*');
-    }
-
-    function measure() {
-      if (pending) return;
-      pending = true;
-      cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(() => {
-        pending = false;
-        post(currentHeight());
-      });
-    }
-
-    // Initial + key events
-    window.addEventListener('load', measure, { once: true });
-    window.addEventListener('resize', measure);
-
-    // Observe meaningful changes only
-    new ResizeObserver(measure).observe(document.body);
-    new MutationObserver(() => measure()).observe(document.body, { childList: true, subtree: true, attributes: true });
-
-    // Answer parent pings
-    window.addEventListener('message', (e) => {
-      if (e.data && e.data.__STONKY_PING__) measure();
-    });
-
-    // small delayed checks for async widgets
-    setTimeout(measure, 500);
-    setTimeout(measure, 1500);
-  })();
-</script>
-
+      function currentHeight() {
+        const d = document.documentElement, b = document.body;
+        return Math.max(d.scrollHeight, b.scrollHeight, d.offsetHeight, b.offsetHeight);
+      }
+      function post(h) {
+        h = Math.ceil(h);
+        if (Math.abs(h - last) < MIN_DELTA) return;
+        last = h;
+        parent.postMessage({ __STONKY_RESIZE__: true, height: h }, '*');
+      }
+      function measure() {
+        if (pending) return;
+        pending = true;
+        cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(() => {
+          pending = false;
+          post(currentHeight());
+        });
+      }
+      window.addEventListener('load', measure, { once: true });
+      window.addEventListener('resize', measure);
+      new ResizeObserver(measure).observe(document.body);
+      new MutationObserver(() => measure()).observe(document.body, { childList: true, subtree: true, attributes: true });
+      window.addEventListener('message', (e) => { if (e.data && e.data.__STONKY_PING__) measure(); });
+      setTimeout(measure, 500);
+      setTimeout(measure, 1500);
+    })();
+  </script>
 </body>
 </html>
