@@ -52,13 +52,13 @@
       --grad-b:#14F195; /* Solana green */
       --brand:#9a6bff;
 
-      /* Jupiter plugin overridables */
-      --jupiter-plugin-primary: 153, 69, 255;
+      /* Jupiter plugin theme — matched to site palette (used by plugin if supported) */
+      --jupiter-plugin-primary: 154, 107, 255;
+      --jupiter-plugin-primaryText: 248, 252, 255;
       --jupiter-plugin-background: 11, 16, 32;
-      --jupiter-plugin-primary-text: 232, 249, 255;
-      --jupiter-plugin-warning: 251, 191, 36;
+      --jupiter-plugin-module: 18, 26, 43; /* slightly darker for contrast */
       --jupiter-plugin-interactive: 20, 241, 149;
-      --jupiter-plugin-module: 25, 36, 61;
+      --jupiter-plugin-warning: 251, 191, 36;
     }
 
     html,body{height:100%}
@@ -103,25 +103,51 @@
     @keyframes pulse{ 0%{opacity:.8; transform:scale(.9)} 70%{opacity:0; transform:scale(1.3)} 100%{opacity:0} }
 
     /* JUP callout inside card (non-interactive overlay) */
-    .jup-callout{ position:absolute; right:12px; bottom:12px; pointer-events:none; display:flex; align-items:center; gap:8px; opacity:.9 }
-    .jup-callout .arrow{ filter: drop-shadow(0 0 6px rgba(153,69,255,.6)) }
+    .jup-callout{ position:absolute; right:12px; bottom:12px; pointer-events:none; display:flex; align-items:center; gap:8px; opacity:.95 }
+    .jup-callout .arrow{ filter: drop-shadow(0 0 6px rgba(0,0,0,.35)) }
 
     /* Cards */
     .card{ border-radius:16px; box-shadow: 0 10px 30px rgba(0,0,0,.35) }
-      /* Jupiter widget theming + readability */
-    :root{
-      /* Higher-contrast text + slightly darker modules for legibility */
-      --jupiter-plugin-primary: 157, 92, 255;        /* softer purple */
-      --jupiter-plugin-primary-text: 248, 252, 255;  /* brighter text */
-      --jupiter-plugin-background: 10, 14, 28;       /* deeper bg */
-      --jupiter-plugin-module: 18, 26, 48;           /* darker panels */
-      --jupiter-plugin-warning: 255, 196, 38;
-      --jupiter-plugin-interactive: 20, 241, 149;    /* keep Solana green */
+
+    /* Jupiter section: remove color wash, improve edge contrast */
+    .jup-surface{
+      position:relative; border-radius:16px;
+      border:1px solid rgba(255,255,255,0.18); /* stronger edge for separation */
+      background:rgba(6,10,22,0.6);            /* a hair darker behind the iframe */
+      backdrop-filter: blur(10px) saturate(120%); padding:8px;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 10px 28px rgba(0,0,0,0.35);
+    }
+    /* The iframe itself (can’t restyle inside, but we keep it crisp) */
+    #jup-widget iframe{
+      display:block; width:100% !important; min-height:552px;
+      border:1px solid rgba(255,255,255,0.22); /* higher-contrast frame */
+      border-radius:12px; background:transparent;
+      box-shadow: 0 8px 26px rgba(0,0,0,.35);
+      filter: saturate(1.0) contrast(1.0); /* remove extra processing for sharp text */
     }
 
-    /* Visually blend the Jupiter iframe with our glass UI */
-    .jup-surface{ border-radius:16px; border:1px solid var(--glass-border); background:rgba(255,255,255,0.035); backdrop-filter: blur(10px) saturate(120%); padding:8px; }
-    #jup-widget iframe{ display:block; width:100% !important; min-height:552px; border:1px solid var(--glass-border); border-radius:12px; background:rgba(11,16,32,0.96); filter:contrast(1.05) saturate(1.05); box-shadow: 0 8px 30px rgba(0,0,0,.35); }
+    /* Remove the previous soft-light brand wash to keep text crisp */
+    .jup-tint{ display:none; }
+
+    /* Callout pill more legible */
+    .jup-callout span{
+      font-size:12px; line-height:1;
+      background:rgba(0,0,0,0.6);
+      border:1px solid rgba(255,255,255,0.18);
+      padding:6px 8px; border-radius:10px;
+      backdrop-filter: blur(4px);
+    }
+
+    /* Gentle one-time attention for the callout */
+    .jup-callout{ color:#fff; animation: jupPulse 3s ease 1; }
+    .jup-callout .arrow{ opacity: 0.9; transform: translateY(1px); }
+    @keyframes jupPulse{
+      0%{ transform: translateY(0); opacity: 0; }
+      20%{ opacity: 1; }
+      40%{ transform: translateY(-2px); }
+      100%{ transform: translateY(0); opacity: 1; }
+    }
+    @media (prefers-reduced-motion: reduce){ .jup-callout{ animation:none } }
   </style>
 </head>
 <body class="mesh text-white">
@@ -152,7 +178,7 @@
     <div class="rounded-2xl glass card p-6 md:p-8">
       <div class="grid md:grid-cols-2 gap-8">
         <div>
-          <h2 class="text-2xl md:text-3xl font-extrabold leading-tight">Tip <span id="owner-sol" class="text-[#14F195]">—</span>, swap seamlessly, and mint memes — all client‑side.</h2>
+          <h2 class="text-2xl md:text-3xl font-extrabold leading-tight">Tip <span id="owner-sol" class="text-[#14F195]">—</span>, swap seamlessly, and mint memes — all client-side.</h2>
           <p class="mt-3 text-white/70">No servers. Just your wallet, Solana Pay deep links, Jupiter swaps, and a playful meme canvas.</p>
           <div class="mt-5 flex flex-wrap gap-2">
             <button class="tip-btn btn-grad px-3 py-2 rounded-md text-sm font-semibold" data-amount="0.05">Tip 0.05 SOL</button>
@@ -202,17 +228,26 @@
 
       <!-- JUP SWAP embedded inside the Tip Jar card -->
       <hr class="border-white/10 my-4">
-      <div class="mt-2 relative" id="swap">
+      <div class="mt-2" id="swap">
         <div class="flex items-center justify-between mb-2">
-          <h4 class="text-sm text-white/70">Swap to SOL (via Jupiter)</h4>
-          <span class="text-[11px] text-white/50" id="jup-cluster-label">—</span>
+          <h4 class="text-sm font-medium text-white/85">Swap to SOL (via Jupiter)</h4>
+          <span class="text-[11px] text-white/60" id="jup-cluster-label">—</span>
         </div>
-        <div class="relative jup-surface">
-          <div id="jup-widget" style="width:100%; min-height:568px;"></div>
+
+        <div class="relative rounded-xl overflow-hidden jup-surface">
+          <!-- The Jupiter widget mounts here -->
+          <div id="jup-widget" class="w-full min-h-[568px]"></div>
+
+          <!-- Brand tint removed for readability. Keep this element if you ever want it back. -->
+          <div class="jup-tint" aria-hidden="true"></div>
+
           <!-- Non-blocking hint pinned to the widget's bottom-right corner -->
-          <div class="jup-callout" aria-hidden="true">
-            <svg class="arrow" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 17L17 7"/><path d="M7 7h10v10"/></svg>
-            <span class="text-xs bg-black/50 border border-white/10 px-2 py-1 rounded">Click inside to swap</span>
+          <div class="pointer-events-none absolute bottom-3 right-3 flex items-center gap-1.5 jup-callout" aria-hidden="true">
+            <svg class="arrow" width="18" height="18" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M7 17L17 7"/><path d="M7 7h10v10"/>
+            </svg>
+            <span>Click inside to swap</span>
           </div>
         </div>
       </div>
@@ -317,5 +352,32 @@
       fab.addEventListener('click', () => jup.scrollIntoView({behavior:'smooth', block:'start'}));
     })();
   </script>
+  <script>
+  // Child → report full document height whenever it changes
+  (function () {
+    const send = () => {
+      const h = Math.max(
+        document.documentElement.scrollHeight,
+        document.body.scrollHeight,
+        document.documentElement.offsetHeight
+      );
+      parent.postMessage({ __STONKY_RESIZE__: true, height: h }, '*');
+    };
+
+    // Fire at key moments
+    window.addEventListener('load', send);
+    window.addEventListener('resize', send);
+    setTimeout(send, 400);   // after async widgets paint
+    setTimeout(send, 1200);  // after Jupiter settles
+    setTimeout(send, 3000);  // belt & suspenders
+
+    // Track DOM changes (JUP widget expands/collapses)
+    new ResizeObserver(send).observe(document.documentElement);
+    new MutationObserver(send).observe(document.documentElement, {
+      childList: true, subtree: true, attributes: true
+    });
+  })();
+</script>
+
 </body>
 </html>
