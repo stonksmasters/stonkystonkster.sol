@@ -60,6 +60,14 @@
       --jupiter-plugin-interactive: 20, 241, 149;
       --jupiter-plugin-warning: 251, 191, 36;
     }
+    @media (max-width: 420px){
+  header { padding: 12px !important; }
+  .card { border-radius: 12px; padding: 12px !important; }
+  h1, .text-2xl { font-size: 1.125rem !important; }
+  #jup-widget iframe { min-height: 520px !important; }
+  .btn-grad { animation-duration: 9s; } /* calmer */
+}
+html, body { overscroll-behavior-y: contain; } /* prevents rubber-band + bounce loops */
 
     html,body{height:100%}
     body{
@@ -353,29 +361,50 @@
     })();
   </script>
   <script>
-  // Child → report full document height whenever it changes
+  // Debounced, low-churn height reporter
   (function () {
-    const send = () => {
-      const h = Math.max(
-        document.documentElement.scrollHeight,
-        document.body.scrollHeight,
-        document.documentElement.offsetHeight
-      );
+    const MIN_DELTA = 8;
+    let last = 0, raf = 0, pending = false;
+
+    function currentHeight() {
+      // robust doc height
+      const d = document.documentElement, b = document.body;
+      return Math.max(d.scrollHeight, b.scrollHeight, d.offsetHeight, b.offsetHeight);
+    }
+
+    function post(h) {
+      h = Math.ceil(h);
+      if (Math.abs(h - last) < MIN_DELTA) return;
+      last = h;
       parent.postMessage({ __STONKY_RESIZE__: true, height: h }, '*');
-    };
+    }
 
-    // Fire at key moments
-    window.addEventListener('load', send);
-    window.addEventListener('resize', send);
-    setTimeout(send, 400);   // after async widgets paint
-    setTimeout(send, 1200);  // after Jupiter settles
-    setTimeout(send, 3000);  // belt & suspenders
+    function measure() {
+      if (pending) return;
+      pending = true;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        pending = false;
+        post(currentHeight());
+      });
+    }
 
-    // Track DOM changes (JUP widget expands/collapses)
-    new ResizeObserver(send).observe(document.documentElement);
-    new MutationObserver(send).observe(document.documentElement, {
-      childList: true, subtree: true, attributes: true
+    // Initial + key events
+    window.addEventListener('load', measure, { once: true });
+    window.addEventListener('resize', measure);
+
+    // Observe meaningful changes only
+    new ResizeObserver(measure).observe(document.body);
+    new MutationObserver(() => measure()).observe(document.body, { childList: true, subtree: true, attributes: true });
+
+    // Answer parent pings
+    window.addEventListener('message', (e) => {
+      if (e.data && e.data.__STONKY_PING__) measure();
     });
+
+    // small delayed checks for async widgets
+    setTimeout(measure, 500);
+    setTimeout(measure, 1500);
   })();
 </script>
 
