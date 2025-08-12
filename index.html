@@ -232,27 +232,28 @@
       <div id="api-mode" class="space-y-3 hidden">
         <div class="flex items-center justify-between">
           <h4 class="text-sm text-white/70">Popular Templates (live)</h4>
-          <input id="template-search" placeholder="Search…" class="bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-sm focus-glow" />
+          <!-- CHANGED: id -> meme-search -->
+          <input id="meme-search" placeholder="Search…" class="bg-white/5 border border-white/10 rounded-lg px-3 py-1.5 text-sm focus-glow" />
         </div>
 
         <div id="api-templates" class="grid grid-cols-3 md:grid-cols-5 gap-2"></div>
+        <!-- CHANGED: pager IDs to match meme.ts -->
         <div id="api-pager" class="flex items-center justify-between text-xs text-white/70">
-          <button id="api-prev" class="px-3 py-1 rounded-md border border-white/15 bg-white/10 hover:bg-white/15 transition focus-glow">Prev</button>
-          <div><span id="api-page">1</span> / <span id="api-pages">1</span></div>
-          <button id="api-next" class="px-3 py-1 rounded-md border border-white/15 bg-white/10 hover:bg-white/15 transition focus-glow">Next</button>
+          <button id="meme-prev-page" class="px-3 py-1 rounded-md border border-white/15 bg-white/10 hover:bg-white/15 transition focus-glow">Prev</button>
+          <div id="meme-page-label">1 / 1</div>
+          <button id="meme-next-page" class="px-3 py-1 rounded-md border border-white/15 bg-white/10 hover:bg-white/15 transition focus-glow">Next</button>
         </div>
 
-        <div class="grid md:grid-cols-2 gap-2">
-          <input id="api-top"    placeholder="Top text"    class="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm focus-glow" />
-          <input id="api-bottom" placeholder="Bottom text" class="bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm focus-glow" />
-        </div>
+        <!-- CHANGED: dynamic inputs container replaces fixed top/bottom -->
+        <div id="api-lines" class="grid md:grid-cols-2 gap-2"></div>
 
         <div class="glass rounded-lg p-3">
-          <img id="api-preview" class="w-full rounded-lg border border-white/10" alt="Preview"/>
+          <!-- CHANGED: ids to match meme.ts -->
+          <img id="meme-preview" class="w-full rounded-lg border border-white/10" alt="Preview"/>
           <div class="flex gap-2 mt-2">
-            <a id="api-open" class="btn-grad px-3 py-2 rounded-lg font-semibold text-center flex-1" target="_blank" rel="noopener">Open Image</a>
-            <button id="api-copy" class="px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition focus-glow">Copy URL</button>
-            <button id="api-download" class="px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition focus-glow">Download (SNS watermark)</button>
+            <a id="meme-open" class="btn-grad px-3 py-2 rounded-lg font-semibold text-center flex-1" target="_blank" rel="noopener">Open Image</a>
+            <button id="meme-copy" class="px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition focus-glow">Copy URL</button>
+            <button id="meme-download" class="px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition focus-glow">Download (SNS watermark)</button>
           </div>
           <div id="api-watermark-hint" class="text-xs text-white/60 mt-1"></div>
         </div>
