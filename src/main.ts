@@ -7,14 +7,85 @@ import "./polyfills";
 import { CONFIG } from "./components/config";
 import { initConnection } from "./components/solana";
 import { initTipJar } from "./components/tipjar";
-import { initMemeGen } from "./components/meme";
+import { initMemeGen, setMemeWatermark } from "./components/meme";
 
 // Expose typing for plugin script
 declare global {
   interface Window {
     Jupiter?: { init: (opts: any) => void };
-    solana?: any;
+    solana?: any; // Phantom provider
     __ENV__?: Record<string, string>;
+  }
+}
+
+// ----- Helpers for watermark label from wallet -----
+function shorten(pk: string) {
+  return pk && pk.length > 10 ? `${pk.slice(0, 4)}…${pk.slice(-4)}` : pk;
+}
+
+// If you later add an SNS reverse resolver, call setMemeWatermark()
+// with the resolved domain and it will override this fallback.
+function computeWalletLabel(): string {
+  try {
+    const pk = window.solana?.publicKey?.toBase58?.() ?? "";
+    return pk ? shorten(pk) : "";
+  } catch {
+    return "";
+  }
+}
+
+// Hook Phantom events to keep the meme watermark synced with the user
+function initWalletWatermarkBinding() {
+  // Default watermark (site owner) until a user connects
+  setMemeWatermark(CONFIG.OWNER_SOL_DOMAIN || "");
+
+  const applyFromWallet = () => {
+    const label = computeWalletLabel();
+    if (label) setMemeWatermark(label);
+  };
+
+  // Support a nicer label pushed from elsewhere (e.g., SNS resolver)
+  // Usage from any module:
+  //   window.dispatchEvent(new CustomEvent("stonky:walletLabel", { detail: { label: "alice.sol" } }));
+  window.addEventListener("stonky:walletLabel", (e: any) => {
+    const label = e?.detail?.label;
+    if (typeof label === "string" && label.trim()) {
+      setMemeWatermark(label.trim());
+    }
+  });
+
+  const wireProvider = (prov: any) => {
+    if (!prov) return;
+
+    // If already connected on load
+    if (prov.isConnected && prov.publicKey) applyFromWallet();
+
+    // Phantom events
+    prov.on?.("connect", applyFromWallet);
+    prov.on?.("accountChanged", (pubkey: any) => {
+      if (pubkey) {
+        applyFromWallet();
+      } else {
+        // Locked / no account available
+        setMemeWatermark(CONFIG.OWNER_SOL_DOMAIN || "");
+      }
+    });
+    prov.on?.("disconnect", () => {
+      setMemeWatermark(CONFIG.OWNER_SOL_DOMAIN || "");
+    });
+  };
+
+  // Provider may inject late — poll briefly
+  if (window.solana) {
+    wireProvider(window.solana);
+  } else {
+    let tries = 0;
+    const t = setInterval(() => {
+      if (window.solana || tries++ > 40) {
+        clearInterval(t);
+        if (window.solana) wireProvider(window.solana);
+      }
+    }, 250);
   }
 }
 
@@ -80,11 +151,12 @@ function initJupiterPlugin() {
 
 // ----- Boot -----
 document.addEventListener("DOMContentLoaded", () => {
-  // Make sure CONFIG has what we expect at runtime (useful on IPFS)
-  // console.debug("[ENV] cluster", CONFIG.DEFAULT_CLUSTER, "mainnet RPCs", CONFIG.MAINNET_RPCS, "devnet RPCs", CONFIG.DEVNET_RPCS);
-
+  // Boot order unchanged
   initConnection();   // RPC pool + backoff (also reads CONFIG lists)
   initTipJar();       // Tip Jar + QR modal
   initMemeGen();      // Meme Shrine
   initJupiterPlugin();
+
+  // Bind watermark ↔ wallet
+  initWalletWatermarkBinding();
 });
