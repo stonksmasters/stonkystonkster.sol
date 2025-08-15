@@ -30,40 +30,38 @@ function is429(e: any): boolean {
   const msg = String(e?.message || e || "");
   return msg.includes("429") || msg.includes("Too many requests") || msg.includes("-32429");
 }
-
 function withTimeout<T>(p: Promise<T>, ms = 3000): Promise<T> {
   return Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
 }
 
-// ---------- Endpoint pool (browser/CORS safe + rotation on 429) ----------
+// ---------- Endpoint pool (browser/CORS safe; uses ONLY configured RPCs) ----------
 function corsFriendly(u: string) {
   const l = u.toLowerCase();
   if (l.includes("publicnode.com")) return false;
   if (l.includes("solana.drpc.org")) return false;
   if (l.includes("rpc.ankr.com/multichain")) return false;
-  return true;
+  return true; // helius & your own gateways OK (assuming allowed origins)
 }
 
 function buildCandidateList(): string[] {
   const { DEFAULT_CLUSTER, DEVNET_RPCS, MAINNET_RPCS } = CONFIG as any;
-  const base = (DEFAULT_CLUSTER === "devnet" ? DEVNET_RPCS : MAINNET_RPCS) || [];
-  const extras =
-    DEFAULT_CLUSTER === "devnet"
-      ? ["https://api.devnet.solana.com"]
-      : [
-          "https://api.mainnet-beta.solana.com",
-          "https://rpc.ankr.com/solana",
-        ];
+  const base: string[] = (DEFAULT_CLUSTER === "devnet" ? DEVNET_RPCS : MAINNET_RPCS) || [];
   const seen = new Set<string>();
-  return [...base, ...extras]
+  return base
     .filter(Boolean)
     .filter(corsFriendly)
-    .filter((u) => (seen.has(u) ? false : (seen.add(u), true)));
+    .filter((u: string) => (seen.has(u) ? false : (seen.add(u), true)));
+}
+
+
+// Helpful hint if Helius denies our origin
+function looksLikeHelius401(err: any, url?: string) {
+  const msg = String(err?.message || err || "");
+  return !!(url && url.includes("helius-rpc.com") && (msg.includes("401") || msg.includes("Unauthorized")));
 }
 
 type Ep = { url: string; cooldownUntil: number; failScore: number };
 const pool: Ep[] = buildCandidateList().map((url) => ({ url, cooldownUntil: 0, failScore: 0 }));
-let curIdx = 0;
 
 let CACHED_CONN: Connection | null = null;
 let CACHED_URL: string | null = null;
@@ -87,7 +85,10 @@ async function pickConn(): Promise<Connection> {
       CACHED_CONN = c;
       CACHED_URL = ep.url;
       return c;
-    } catch {
+    } catch (err) {
+      if (looksLikeHelius401(err, ep.url)) {
+        (window as any)?.toast?.error?.("Helius denied this origin. Add your site to Allowed Origins for this API key.");
+      }
       // penalize & cool down briefly
       ep.failScore += 1;
       ep.cooldownUntil = now + Math.min(30_000, 3_000 * ep.failScore);
@@ -190,7 +191,7 @@ export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: 
     sig = await c.sendRawTransaction(signed.serialize(), { skipPreflight: true });
   }
 
-  // Confirm across multiple connections to avoid a single endpoint's 429s
+  // Confirm across multiple connections (rotates if a single endpoint is hot)
   await confirmSignatureSmart(sig);
 
   (window as any)?.toast?.success?.("Published to Discover");
@@ -217,7 +218,6 @@ async function confirmSignatureSmart(sig: string) {
       await sleep(jitter(800));
     } catch (e) {
       if (is429(e)) {
-        // mark this endpoint as hot and rotate
         const ep = pool.find((p) => p.url === (conn as any)._rpcEndpoint);
         if (ep) backoff(ep, attempts);
       } else {
@@ -268,13 +268,12 @@ async function fetchPage(before?: string, limit = PAGE_SIZE): Promise<FeedItem[]
         break; // chunk ok
       } catch (e) {
         if (is429(e)) {
-          // back off & retry; if keeps failing, rotate endpoint
           const ep = pool.find((p) => p.url === (conn as any)._rpcEndpoint);
           await sleep(backoff(ep, tries++));
           if (tries > 3) {
-            // rotate connection and retry chunk
+            // rotate connection and retry next chunk
             CACHED_CONN = null; CACHED_URL = null;
-            break; // break inner; outer loop will re-run with new conn next iteration
+            break;
           }
         } else {
           // non-429: small delay + skip this chunk
@@ -358,7 +357,7 @@ export function initDiscoverFeed() {
       });
     } catch (err) {
       console.error("[Discover] Failed to load page:", err);
-      (window as any)?.toast?.error?.("RPC busy. Tap again in a moment.");
+      (window as any)?.toast?.error?.("RPC busy / unauthorized. Check your Helius origin allowlist.");
       // Invalidate cache so next click will probe anew
       CACHED_CONN = null; CACHED_URL = null;
     } finally {
