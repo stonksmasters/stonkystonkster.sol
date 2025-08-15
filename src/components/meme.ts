@@ -1,6 +1,7 @@
 // src/components/meme.ts
 // Dynamic Memegen inputs + Local canvas mode
 // Watermark: dynamic (connected user), visible on preview overlay, burned into downloads.
+// + Safe downloads (CORS), record/publish events, open-from-external support.
 
 import { CONFIG } from "./config"; // adjust if your config path differs
 
@@ -42,6 +43,7 @@ let ACTIVE_WM = (CONFIG as any)?.OWNER_SOL_DOMAIN || "";
 /** Public setter: call this from main.ts when wallet connects/changes */
 export function setMemeWatermark(wm?: string) {
   ACTIVE_WM = (wm || "").trim();
+  (window as any).__ACTIVE_WM = ACTIVE_WM; // expose for other modules
   // Update preview overlay + hint immediately
   updatePreviewOverlayText();
   const hint = document.getElementById("api-watermark-hint");
@@ -150,7 +152,6 @@ const memegen = {
     memegen.normalizeLines(lines).forEach((v) => u.searchParams.append("text[]", v));
     u.searchParams.set("font", "impact");
     u.searchParams.set("width", "600");
-    // Their preview watermark may ignore ours; we overlay our own in the UI anyway.
     u.searchParams.set("cb", String(Date.now() % 1e9));
     return u.toString();
   },
@@ -162,10 +163,7 @@ const memegen = {
     const u = new URL(`https://api.memegen.link/images/${encodeURIComponent(tplKey)}/${path}.png`);
     u.searchParams.set("font", "impact");
     u.searchParams.set("width", "600");
-    if ((CONFIG as any)?.MEMEGEN_API_KEY) {
-      u.searchParams.set("api_key", (CONFIG as any).MEMEGEN_API_KEY);
-    }
-    // NOTE: not relying on server-side watermark here
+    if ((CONFIG as any)?.MEMEGEN_API_KEY) u.searchParams.set("api_key", (CONFIG as any).MEMEGEN_API_KEY);
     return u.toString();
   },
 };
@@ -184,7 +182,6 @@ const on = <K extends keyof HTMLElementEventMap>(
   fn: (e: HTMLElementEventMap[K]) => any,
 ) => el?.addEventListener(ev, fn as any);
 
-// Small escape util
 const escapeHtml = (s: string) =>
   s.replace(/[&<>"']/g, (m) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[m]!));
 
@@ -308,12 +305,23 @@ function initLocalCanvasMode() {
 
   on(dlBtn, "click", () => {
     draw(); // ensure latest text + watermark
+    const dataUrl = canvas.toDataURL("image/png");
     const a = document.createElement("a");
-    a.href = canvas.toDataURL("image/png");
+    a.href = dataUrl;
     a.download = (ACTIVE_WM ? `${ACTIVE_WM}-` : "") + "meme.png";
     document.body.appendChild(a);
     a.click();
     a.remove();
+
+    // record locally (for future "My Memes")
+    window.dispatchEvent(new CustomEvent("stonky:recordMeme", {
+      detail: {
+        source: "upload",
+        wm: ACTIVE_WM,
+        creator: (window as any).solana?.publicKey?.toBase58?.() || "",
+        dataUrl,
+      }
+    }));
   });
 
   // initial canvas
@@ -332,10 +340,8 @@ function ensurePreviewOverlay() {
   const img = document.getElementById("api-preview") || document.getElementById("meme-preview");
   if (!card || !img) return;
 
-  // Make card a positioning context
   if (getComputedStyle(card).position === "static") (card as HTMLElement).style.position = "relative";
 
-  // Overlay element
   let ov = document.getElementById("api-wm-overlay") as HTMLDivElement | null;
   if (!ov) {
     ov = document.createElement("div");
@@ -358,6 +364,7 @@ function updatePreviewOverlayText() {
   if (!ov) return;
   ov.textContent = ACTIVE_WM || "";
   ov.style.display = ACTIVE_WM ? "block" : "none";
+  (window as any).__ACTIVE_WM = ACTIVE_WM;
 }
 
 async function initApiTemplateMode() {
@@ -378,11 +385,21 @@ async function initApiTemplateMode() {
   const pagesSpan = pick<HTMLElement>("api-pages");
   const wmHint = pick<HTMLElement>("api-watermark-hint");
 
+  // Inject "Publish" button once (dispatches event; discover.ts can handle on-chain)
+  let pubBtn = document.getElementById("api-publish") as HTMLButtonElement | null;
+  if (!pubBtn && dlBtn?.parentElement) {
+    pubBtn = document.createElement("button");
+    pubBtn.id = "api-publish";
+    pubBtn.className =
+      "px-3 py-2 rounded-lg border border-white/15 bg-white/10 text-sm hover:bg-white/15 transition focus-glow";
+    pubBtn.textContent = "Publish";
+    dlBtn.parentElement.insertBefore(pubBtn, dlBtn.nextSibling);
+  }
+
   // Create #api-lines + example hint if missing
   let exampleHint = document.getElementById("api-example") as HTMLDivElement | null;
   if (!linesWrap) {
-    const parent =
-      document.getElementById("api-mode") || tray?.parentElement || document.body;
+    const parent = document.getElementById("api-mode") || tray?.parentElement || document.body;
     linesWrap = document.createElement("div");
     linesWrap.id = "api-lines";
     linesWrap.className = "grid md:grid-cols-2 gap-2";
@@ -400,7 +417,6 @@ async function initApiTemplateMode() {
       parent!.appendChild(exampleHint);
     }
 
-    // Hide any legacy two-inputs if still present
     document.getElementById("api-top")?.classList.add("hidden");
     document.getElementById("api-bottom")?.classList.add("hidden");
   }
@@ -409,7 +425,7 @@ async function initApiTemplateMode() {
 
   if (wmHint) wmHint.textContent = ACTIVE_WM ? `Watermark: ${ACTIVE_WM}` : "";
 
-  let all = await memegen.list();
+  const all = await memegen.list();
   let filtered = all.slice();
   let page = 1;
 
@@ -431,6 +447,8 @@ async function initApiTemplateMode() {
         preview.src = prev;
         openBtn.href = fin;
         _apiCurrentFinalUrl = fin;
+        (preview as any).dataset.tpl = _apiSelectedId;
+        (preview as any).dataset.lines = JSON.stringify(lines);
       });
     };
   })();
@@ -455,7 +473,7 @@ async function initApiTemplateMode() {
   };
 
   const buildLineInputs = (count: number, defaults?: string[]) => {
-    selectedLineCount = Math.max(1, count | 0); // reset per template
+    selectedLineCount = Math.max(1, count | 0);
     linesWrap!.innerHTML = "";
     for (let i = 0; i < selectedLineCount; i++) {
       const input = document.createElement("input");
@@ -506,7 +524,6 @@ async function initApiTemplateMode() {
         } catch {
           currentExample = undefined;
         }
-
         if (KNOWN_LINE_OVERRIDES[_apiSelectedId] && KNOWN_LINE_OVERRIDES[_apiSelectedId] > n) {
           n = KNOWN_LINE_OVERRIDES[_apiSelectedId];
         }
@@ -555,14 +572,73 @@ async function initApiTemplateMode() {
     } catch { (window as any)?.toast?.error?.("Failed to copy"); }
   });
 
-  // Download with OUR watermark burned in
+  // Download with OUR watermark burned in (+ record event)
   on(dlBtn, "click", async (e) => {
     e.preventDefault();
     try {
       const url = _apiCurrentFinalUrl;
       const fileName = (_apiSelectedId || "meme") + ".png";
       await downloadWithWatermark(url, fileName, ACTIVE_WM);
+
+      // record locally
+      window.dispatchEvent(new CustomEvent("stonky:recordMeme", {
+        detail: {
+          source: "api",
+          tpl: _apiSelectedId,
+          lines: _apiGetLines?.() || [],
+          wm: ACTIVE_WM,
+          creator: (window as any).solana?.publicKey?.toBase58?.() || "",
+          finalUrl: url,
+          thumb: preview.src,
+        }
+      }));
     } catch { (window as any)?.toast?.error?.("Download failed"); }
+  });
+
+  // Publish (dispatch event for discover module)
+  on(pubBtn!, "click", async (e) => {
+    e.preventDefault();
+    try {
+      const lines = _apiGetLines?.() || [];
+      window.dispatchEvent(new CustomEvent("stonky:publishMeme", {
+        detail: { key: _apiSelectedId, lines, wm: ACTIVE_WM }
+      }));
+      (window as any)?.toast?.success?.("Publishing…");
+    } catch (err) {
+      (window as any)?.toast?.error?.("Publish failed");
+      console.error(err);
+    }
+  });
+
+  // Accept "open meme" from Discover/My Memes
+  window.addEventListener("stonky:openMeme", (e: any) => {
+    const { tpl, lines } = e.detail || {};
+    if (!tpl || !Array.isArray(lines)) return;
+    const btn = tray.querySelector<HTMLButtonElement>(`button[data-id="${tpl}"]`);
+    if (btn) btn.click();
+    setTimeout(() => {
+      const inputs = linesWrap!.querySelectorAll<HTMLInputElement>("input.api-line");
+      inputs.forEach((inp, i) => (inp.value = typeof lines[i] === "string" ? lines[i] : inp.value));
+      updatePreview();
+    }, 300);
+  });
+
+  // External download request (from library/discover cards)
+  window.addEventListener("stonky:downloadMeme", async (e: any) => {
+    const rec = e.detail || {};
+    try {
+      const name = (rec.tpl || "meme") + ".png";
+      if (rec.finalUrl) {
+        await downloadWithWatermark(rec.finalUrl, name, rec.wm || ACTIVE_WM);
+      } else if (rec.dataUrl) {
+        const a = document.createElement("a");
+        a.href = rec.dataUrl;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+    } catch {}
   });
 }
 
@@ -618,55 +694,99 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
   ctx.closePath();
 }
 
+// ---- PROD-SAFE download pipeline (with fallback) ----
 async function downloadWithWatermark(url: string, name: string, wm: string) {
-  // Draw remote image to canvas, add our watermark pill, download as PNG
-  const img = await loadImage(url);
-  const c = document.createElement("canvas");
-  c.width = img.naturalWidth || img.width;
-  c.height = img.naturalHeight || img.height;
-  const cx = c.getContext("2d")!;
-  cx.drawImage(img, 0, 0, c.width, c.height);
+  try {
+    // 1) Fetch the bytes with CORS so we can draw to canvas safely
+    const resp = await fetch(url, {
+      mode: "cors",
+      credentials: "omit",
+      cache: "no-store",
+      referrerPolicy: "no-referrer",
+    });
+    if (!resp.ok) throw new Error(`fetch ${resp.status}`);
+    const srcBlob = await resp.blob();
 
-  if (wm) {
-    const pad = Math.max(12, Math.round(c.width * 0.02));
-    const size = Math.max(18, Math.round(c.width / 32));
-    cx.save();
-    cx.font = `600 ${size}px Inter, system-ui, sans-serif`;
-    cx.textAlign = "right";
-    cx.textBaseline = "bottom";
-    const metrics = cx.measureText(wm);
-    const textW = metrics.width;
-    const textH = size * 1.35;
-    const boxW = textW + pad * 1.5;
-    const boxH = textH + pad * 0.8;
-    const x = c.width - pad;
-    const y = c.height - pad;
+    // 2) Convert to same-origin blob URL → draw to canvas
+    const blobUrl = URL.createObjectURL(srcBlob);
+    const img = await loadImage(blobUrl, true);
+    URL.revokeObjectURL(blobUrl);
 
-    cx.fillStyle = "rgba(0,0,0,0.45)";
-    roundRect(cx, x - boxW, y - boxH, boxW, boxH, Math.max(8, Math.round(size / 2.5)));
-    cx.fill();
+    const c = document.createElement("canvas");
+    c.width = img.naturalWidth || img.width;
+    c.height = img.naturalHeight || img.height;
+    const cx = c.getContext("2d")!;
+    cx.drawImage(img, 0, 0, c.width, c.height);
 
-    cx.fillStyle = "#fff";
-    cx.fillText(wm, x - pad * 0.75, y - pad * 0.4);
-    cx.restore();
-  }
+    if (wm) {
+      const pad = Math.max(12, Math.round(c.width * 0.02));
+      const size = Math.max(18, Math.round(c.width / 32));
+      cx.save();
+      cx.font = `600 ${size}px Inter, system-ui, sans-serif`;
+      cx.textAlign = "right";
+      cx.textBaseline = "bottom";
+      const metrics = cx.measureText(wm);
+      const textW = metrics.width;
+      const textH = size * 1.35;
+      const boxW = textW + pad * 1.5;
+      const boxH = textH + pad * 0.8;
+      const x = c.width - pad;
+      const y = c.height - pad;
 
-  const blob = await new Promise<Blob | null>((res) => c.toBlob(res, "image/png"));
-  if (blob) {
+      cx.fillStyle = "rgba(0,0,0,0.45)";
+      roundRect(cx, x - boxW, y - boxH, boxW, boxH, Math.max(8, Math.round(size / 2.5)));
+      cx.fill();
+
+      cx.fillStyle = "#fff";
+      cx.fillText(wm, x - pad * 0.75, y - pad * 0.4);
+      cx.restore();
+    }
+
+    const outBlob = await new Promise<Blob | null>((res) => c.toBlob(res, "image/png"));
+    if (!outBlob) throw new Error("toBlob failed");
+
+    const aUrl = URL.createObjectURL(outBlob);
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
+    a.href = aUrl;
     a.download = name;
     document.body.appendChild(a);
     a.click();
     a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 0);
+    setTimeout(() => URL.revokeObjectURL(aUrl), 0);
+    return;
+  } catch (err) {
+    // Fallback: direct download with server-side watermark param
+    try {
+      const u = new URL(url);
+      if (wm) u.searchParams.set("watermark", wm);
+      await directDownload(u.toString(), name);
+      return;
+    } catch {
+      // last resort
+      window.open(url, "_blank");
+    }
   }
 }
 
-function loadImage(src: string): Promise<HTMLImageElement> {
+async function directDownload(url: string, name: string) {
+  const r = await fetch(url, { mode: "cors", credentials: "omit", cache: "no-store" });
+  if (!r.ok) throw new Error(`download ${r.status}`);
+  const b = await r.blob();
+  const aUrl = URL.createObjectURL(b);
+  const a = document.createElement("a");
+  a.href = aUrl;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(aUrl), 0);
+}
+
+// If src is a blob: URL, do NOT set crossOrigin (Safari quirk). Otherwise, do.
+function loadImage(src: string, isBlobUrl = false): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.crossOrigin = "anonymous"; // needed for canvas export
+    if (!isBlobUrl && /^https?:/i.test(src)) img.crossOrigin = "anonymous";
     img.onload = () => resolve(img);
     img.onerror = (e) => reject(e);
     img.src = src;

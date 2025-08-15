@@ -8,6 +8,8 @@ import { CONFIG } from "./components/config";
 import { initConnection } from "./components/solana";
 import { initTipJar } from "./components/tipjar";
 import { initMemeGen, setMemeWatermark } from "./components/meme";
+import { initDiscoverFeed } from "./components/discover";
+import { initMemeLibrary } from "./components/library";
 
 // Expose typing for plugin script
 declare global {
@@ -28,6 +30,11 @@ async function withTimeout<T>(p: Promise<T>, ms = 2500): Promise<T> {
     p,
     new Promise<T>((_, rej) => setTimeout(() => rej(new Error("timeout")), ms)),
   ]);
+}
+
+// Emit wallet-state for other modules (library, etc.)
+function emitWalletChanged(pubkey: string | null, label: string | null) {
+  window.dispatchEvent(new CustomEvent("stonky:walletChanged", { detail: { pubkey, label } }));
 }
 
 // Best-effort SNS reverse lookup (quietly falls back if anything fails)
@@ -75,20 +82,24 @@ function computeWalletLabelSync(): string {
   }
 }
 
-// Hook Phantom events to keep the meme watermark synced with the user
+// Hook Phantom events to keep the meme watermark + other modules synced with the user
 function initWalletWatermarkBinding() {
   // Default watermark (site owner) until a user connects
   setMemeWatermark(CONFIG.OWNER_SOL_DOMAIN || "");
+  emitWalletChanged(null, null);
 
   const applyFromWallet = async () => {
     const pk = window.solana?.publicKey?.toBase58?.();
     if (!pk) {
       setMemeWatermark(CONFIG.OWNER_SOL_DOMAIN || "");
+      emitWalletChanged(null, null);
       return;
     }
     // Try SNS reverse; fallback to shortened pubkey
     const domain = await tryResolveSnsReverse(pk).catch(() => null);
-    setMemeWatermark(domain || shorten(pk));
+    const label = domain || shorten(pk);
+    setMemeWatermark(label);
+    emitWalletChanged(pk, label);
   };
 
   // Support a nicer label pushed from elsewhere (e.g., your own SNS resolver)
@@ -97,6 +108,8 @@ function initWalletWatermarkBinding() {
     const label = e?.detail?.label;
     if (typeof label === "string" && label.trim()) {
       setMemeWatermark(label.trim());
+      const pk = window.solana?.publicKey?.toBase58?.() || null;
+      emitWalletChanged(pk, label.trim());
     }
   });
 
@@ -110,10 +123,14 @@ function initWalletWatermarkBinding() {
     prov.on?.("connect", applyFromWallet);
     prov.on?.("accountChanged", (pubkey: any) => {
       if (pubkey) applyFromWallet();
-      else setMemeWatermark(CONFIG.OWNER_SOL_DOMAIN || "");
+      else {
+        setMemeWatermark(CONFIG.OWNER_SOL_DOMAIN || "");
+        emitWalletChanged(null, null);
+      }
     });
     prov.on?.("disconnect", () => {
       setMemeWatermark(CONFIG.OWNER_SOL_DOMAIN || "");
+      emitWalletChanged(null, null);
     });
   };
 
@@ -192,12 +209,16 @@ function initJupiterPlugin() {
 
 // ---------- Boot ----------
 document.addEventListener("DOMContentLoaded", () => {
-  // Boot order unchanged
+  // Core features
   initConnection();   // RPC pool + backoff (also reads CONFIG lists)
   initTipJar();       // Tip Jar + QR modal
   initMemeGen();      // Meme Shrine
   initJupiterPlugin();
 
-  // Bind watermark ↔ wallet (+ SNS reverse)
+  // New: personal library + community feed (serverless)
+  initMemeLibrary();
+  initDiscoverFeed();
+
+  // Bind watermark ↔ wallet (+ SNS reverse) + broadcast wallet changes
   initWalletWatermarkBinding();
 });
