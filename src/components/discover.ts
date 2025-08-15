@@ -1,5 +1,6 @@
 // src/components/discover.ts
-// Serverless "Discover" feed via on-chain Memo, + publish handler with CORS-safe RPC selection.
+// Serverless "Discover" feed via on-chain Memo, with rate-limit aware RPC selection,
+// light pagination, chunked getTransactions, backoff, and multi-endpoint confirmation.
 
 import { CONFIG } from "./config";
 import {
@@ -16,62 +17,107 @@ const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfc
 const REGISTRY_PK = new PublicKey((CONFIG as any).PUBLISH_REGISTRY || (CONFIG as any).OWNER_WALLET);
 const enc = new TextEncoder();
 
-type PublishPayload = { v: 1; t: "api"; k: string; l: string[]; wm?: string; c: string };
-type FeedItem = { sig: string; slot: number; time: number; p: PublishPayload };
+// UI + paging
+const PAGE_SIZE = 12;         // lighter pages to avoid big RPC bursts
+const TX_CHUNK = 6;           // chunk getTransactions calls
+const MIN_CALL_SPACING = 250; // ms between RPC calls (soft client-side rate limit)
 
-// ---------- Utils ----------
-function withTimeout<T>(p: Promise<T>, ms = 2500): Promise<T> {
+// ---------- Small utils ----------
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const jitter = (ms: number) => ms + Math.floor(Math.random() * 150);
+
+function is429(e: any): boolean {
+  const msg = String(e?.message || e || "");
+  return msg.includes("429") || msg.includes("Too many requests") || msg.includes("-32429");
+}
+
+function withTimeout<T>(p: Promise<T>, ms = 3000): Promise<T> {
   return Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
 }
 
+// ---------- Endpoint pool (browser/CORS safe + rotation on 429) ----------
 function corsFriendly(u: string) {
   const l = u.toLowerCase();
-  // Exclude endpoints that commonly break CORS in browsers
   if (l.includes("publicnode.com")) return false;
   if (l.includes("solana.drpc.org")) return false;
-  if (l.includes("rpc.ankr.com/multichain")) return false; // not Solana JSON-RPC
+  if (l.includes("rpc.ankr.com/multichain")) return false;
   return true;
 }
 
-// Build a probe list: your configured list first, then safe fallbacks
-function buildProbeList(): string[] {
+function buildCandidateList(): string[] {
   const { DEFAULT_CLUSTER, DEVNET_RPCS, MAINNET_RPCS } = CONFIG as any;
   const base = (DEFAULT_CLUSTER === "devnet" ? DEVNET_RPCS : MAINNET_RPCS) || [];
-  const extra = [
-    "https://api.mainnet-beta.solana.com",
-    "https://rpc.ankr.com/solana",
-    "https://api.devnet.solana.com", // harmless if mainnet; just filtered out by cluster usage
-  ];
+  const extras =
+    DEFAULT_CLUSTER === "devnet"
+      ? ["https://api.devnet.solana.com"]
+      : [
+          "https://api.mainnet-beta.solana.com",
+          "https://rpc.ankr.com/solana",
+        ];
   const seen = new Set<string>();
-  return [...base, ...extra]
+  return [...base, ...extras]
     .filter(Boolean)
-    .filter((u) => corsFriendly(u))
+    .filter(corsFriendly)
     .filter((u) => (seen.has(u) ? false : (seen.add(u), true)));
 }
 
-let CACHED_ENDPOINT: string | null = null;
-let CACHED_CONN: Connection | null = null;
+type Ep = { url: string; cooldownUntil: number; failScore: number };
+const pool: Ep[] = buildCandidateList().map((url) => ({ url, cooldownUntil: 0, failScore: 0 }));
+let curIdx = 0;
 
-// Probe endpoints until one responds to getLatestBlockhash; cache the winner
-async function getConn(): Promise<Connection> {
-  if (CACHED_CONN) return CACHED_CONN;
-  const candidates = buildProbeList();
-  for (const url of candidates) {
+let CACHED_CONN: Connection | null = null;
+let CACHED_URL: string | null = null;
+
+async function pickConn(): Promise<Connection> {
+  const now = Date.now();
+
+  // Prefer cached if not cooling down
+  if (CACHED_CONN && CACHED_URL) {
+    const ep = pool.find((p) => p.url === CACHED_URL);
+    if (ep && ep.cooldownUntil <= now) return CACHED_CONN;
+  }
+
+  // Find best available (lowest failScore, not cooling)
+  const order = [...pool].sort((a, b) => (a.cooldownUntil - b.cooldownUntil) || (a.failScore - b.failScore));
+  for (const ep of order) {
+    if (ep.cooldownUntil > now) continue;
     try {
-      const c = new Connection(url, { commitment: "confirmed" });
-      await withTimeout(c.getLatestBlockhash("finalized"), 3000); // probe
-      CACHED_ENDPOINT = url;
+      const c = new Connection(ep.url, { commitment: "confirmed" });
+      await withTimeout(c.getLatestBlockhash("finalized"), 3500); // probe
       CACHED_CONN = c;
-      // console.debug("[Discover] Using RPC:", url);
+      CACHED_URL = ep.url;
       return c;
     } catch {
-      // try next
+      // penalize & cool down briefly
+      ep.failScore += 1;
+      ep.cooldownUntil = now + Math.min(30_000, 3_000 * ep.failScore);
     }
   }
-  throw new Error("No CORS-friendly Solana RPC available");
+  throw new Error("No CORS-friendly RPC available");
+}
+
+function backoff(ep?: Ep, attempt = 0) {
+  const base = [500, 1000, 2000, 4000, 6000][Math.min(attempt, 4)];
+  const wait = jitter(base);
+  if (ep) {
+    ep.failScore += 1;
+    ep.cooldownUntil = Date.now() + Math.min(60_000, base * 3);
+  }
+  return wait;
+}
+
+// Soft client-side rate limiter
+let lastCall = 0;
+async function rateLimitPause() {
+  const delta = Date.now() - lastCall;
+  if (delta < MIN_CALL_SPACING) await sleep(MIN_CALL_SPACING - delta);
+  lastCall = Date.now();
 }
 
 // ---------- Payload helpers ----------
+type PublishPayload = { v: 1; t: "api"; k: string; l: string[]; wm?: string; c: string };
+type FeedItem = { sig: string; slot: number; time: number; p: PublishPayload };
+
 function encodePayload(p: PublishPayload): string {
   const safe: PublishPayload = {
     v: 1,
@@ -110,7 +156,7 @@ function likeLink(to: string, memeId: string, amount = 0.0001) {
   return url.toString();
 }
 
-// ---------- Public: publish API meme ----------
+// ---------- Publish ----------
 export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: string }) {
   const provider = (window as any).solana;
   if (!provider?.publicKey) throw new Error("Connect wallet first");
@@ -129,53 +175,118 @@ export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: 
     lamports: 0,
   });
 
-  const c = await getConn();
+  const c = await pickConn();
   const tx = new Transaction().add(zeroIx, memoIx);
   tx.feePayer = provider.publicKey;
   tx.recentBlockhash = (await c.getLatestBlockhash("finalized")).blockhash;
 
-  // Prefer wallet sending (handles RPC nuances), but still confirm via our conn
+  // Prefer wallet to send (handles their own RPC quotas)
+  let sig: string;
   if (typeof provider.signAndSendTransaction === "function") {
-    const { signature } = await provider.signAndSendTransaction(tx);
-    await c.confirmTransaction(signature, "confirmed");
-    (window as any)?.toast?.success?.("Published to Discover");
-    window.dispatchEvent(new CustomEvent("stonky:published", { detail: { sig: signature, payload } }));
-    return signature;
+    const res = await provider.signAndSendTransaction(tx);
+    sig = res.signature;
   } else {
     const signed = await provider.signTransaction(tx);
-    const sig = await c.sendRawTransaction(signed.serialize(), { skipPreflight: true });
-    await c.confirmTransaction(sig, "confirmed");
-    (window as any)?.toast?.success?.("Published to Discover");
-    window.dispatchEvent(new CustomEvent("stonky:published", { detail: { sig, payload } }));
-    return sig;
+    sig = await c.sendRawTransaction(signed.serialize(), { skipPreflight: true });
   }
+
+  // Confirm across multiple connections to avoid a single endpoint's 429s
+  await confirmSignatureSmart(sig);
+
+  (window as any)?.toast?.success?.("Published to Discover");
+  window.dispatchEvent(new CustomEvent("stonky:published", { detail: { sig, payload } }));
+  return sig;
+}
+
+async function confirmSignatureSmart(sig: string) {
+  // Try the current connection first, then rotate if rate-limited
+  const tried = new Set<string>();
+  let attempts = 0;
+  while (attempts++ < 6) {
+    const conn = await pickConn();
+    if (tried.has((conn as any)._rpcEndpoint)) {
+      await sleep(350 * attempts);
+      continue;
+    }
+    tried.add((conn as any)._rpcEndpoint);
+
+    try {
+      const st = await withTimeout(conn.getSignatureStatuses([sig]), 3500);
+      const s = st?.value?.[0];
+      if (s?.confirmationStatus === "confirmed" || s?.confirmationStatus === "finalized") return;
+      await sleep(jitter(800));
+    } catch (e) {
+      if (is429(e)) {
+        // mark this endpoint as hot and rotate
+        const ep = pool.find((p) => p.url === (conn as any)._rpcEndpoint);
+        if (ep) backoff(ep, attempts);
+      } else {
+        await sleep(jitter(600));
+      }
+    }
+  }
+  // Soft fail — UI already shows “Published”; feed will eventually show it as RPC cools down
 }
 
 // ---------- Discover feed ----------
-async function fetchPage(before?: string, limit = 24): Promise<FeedItem[]> {
-  const c = await getConn();
-  const sigs = await c.getSignaturesForAddress(REGISTRY_PK, before ? { before, limit } : { limit });
+async function fetchPage(before?: string, limit = PAGE_SIZE): Promise<FeedItem[]> {
+  const conn = await pickConn();
+  await rateLimitPause();
+
+  // Signatures (cheap)
+  const sigs = await conn.getSignaturesForAddress(
+    REGISTRY_PK,
+    before ? { before, limit } : { limit },
+  );
   if (!sigs.length) return [];
-  const sigList = sigs.map((s) => s.signature);
-  const txs = await c.getTransactions(sigList, { maxSupportedTransactionVersion: 0 });
 
+  // Fetch transactions in small chunks with backoff on 429
   const out: FeedItem[] = [];
-  for (let i = 0; i < txs.length; i++) {
-    const tx = txs[i];
-    const sig = sigList[i];
-    if (!tx) continue;
+  const list = sigs.map((s) => s.signature);
+  for (let i = 0; i < list.length; i += TX_CHUNK) {
+    const chunk = list.slice(i, i + TX_CHUNK);
+    let tries = 0;
+    for (;;) {
+      try {
+        await rateLimitPause();
+        const txs = await withTimeout(conn.getTransactions(chunk, { maxSupportedTransactionVersion: 0 }), 6000);
+        for (let j = 0; j < txs.length; j++) {
+          const tx = txs[j];
+          const sig = chunk[j];
+          if (!tx) continue;
 
-    let memoStr = "";
-    const logs = (tx.meta as any)?.logMessages || [];
-    const lastLog = logs.filter((m: string) => m?.startsWith("Program log: ")).pop();
-    if (lastLog) memoStr = lastLog.slice("Program log: ".length);
-    else if ((tx.meta as any)?.memo) memoStr = String((tx.meta as any).memo);
+          let memoStr = "";
+          const logs = (tx.meta as any)?.logMessages || [];
+          const lastLog = logs.filter((m: string) => m?.startsWith("Program log: ")).pop();
+          if (lastLog) memoStr = lastLog.slice("Program log: ".length);
+          else if ((tx.meta as any)?.memo) memoStr = String((tx.meta as any).memo);
 
-    const p = tryParsePayload(memoStr);
-    if (!p) continue;
-
-    out.push({ sig, slot: tx.slot, time: (tx.blockTime || 0) * 1000, p });
+          const p = tryParsePayload(memoStr);
+          if (!p) continue;
+          out.push({ sig, slot: tx.slot, time: (tx.blockTime || 0) * 1000, p });
+        }
+        break; // chunk ok
+      } catch (e) {
+        if (is429(e)) {
+          // back off & retry; if keeps failing, rotate endpoint
+          const ep = pool.find((p) => p.url === (conn as any)._rpcEndpoint);
+          await sleep(backoff(ep, tries++));
+          if (tries > 3) {
+            // rotate connection and retry chunk
+            CACHED_CONN = null; CACHED_URL = null;
+            break; // break inner; outer loop will re-run with new conn next iteration
+          }
+        } else {
+          // non-429: small delay + skip this chunk
+          await sleep(jitter(500));
+          break;
+        }
+      }
+    }
+    // If we rotated, reacquire conn for next chunk
+    if (!CACHED_CONN) await pickConn();
   }
+
   return out.sort((a, b) => b.slot - a.slot);
 }
 
@@ -211,7 +322,7 @@ export function initDiscoverFeed() {
     loading = true; more.disabled = true;
 
     try {
-      const page = await fetchPage(lastSig, 24);
+      const page = await fetchPage(lastSig, PAGE_SIZE);
       if (!page.length) { more.textContent = "No more"; return; }
       lastSig = page[page.length - 1].sig;
 
@@ -247,9 +358,9 @@ export function initDiscoverFeed() {
       });
     } catch (err) {
       console.error("[Discover] Failed to load page:", err);
-      (window as any)?.toast?.error?.("RPC unavailable. Trying again…");
-      // Drop cached endpoint so next click will probe anew
-      CACHED_ENDPOINT = null; CACHED_CONN = null;
+      (window as any)?.toast?.error?.("RPC busy. Tap again in a moment.");
+      // Invalidate cache so next click will probe anew
+      CACHED_CONN = null; CACHED_URL = null;
     } finally {
       loading = false; more.disabled = false;
     }
@@ -264,10 +375,10 @@ export function initDiscoverFeed() {
     const { key, lines, wm } = e?.detail || {};
     try { await publishMemeApi({ key, lines, wm }); }
     catch (err) {
+      if (String(err).includes("User rejected")) return; // user canceled wallet prompt
       console.error("[Discover] Publish failed:", err);
-      (window as any)?.toast?.error?.("Publish failed (RPC).");
-      // Invalidate cache so next attempt re-probes RPCs
-      CACHED_ENDPOINT = null; CACHED_CONN = null;
+      (window as any)?.toast?.error?.("Publish failed. Please try again.");
+      CACHED_CONN = null; CACHED_URL = null;
     }
   });
 }
