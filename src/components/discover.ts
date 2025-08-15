@@ -1,7 +1,6 @@
 // src/components/discover.ts
-// Serverless "Discover" feed via on-chain Memo, rate-limit aware RPC selection,
-// chunked reads, robust publish path with detailed debugging + local library save,
-// and optional read-only fallback RPCs for resilience.
+// Serverless "Discover" via Memo: uses only CONFIG RPCs, rotates on 401/403/429,
+// adds optimistic UI on publish, and saves to a local library.
 
 import { CONFIG } from "./config";
 import {
@@ -13,20 +12,15 @@ import {
 } from "@solana/web3.js";
 import { Buffer } from "buffer";
 
-// ---------- Debug (runtime-friendly) ----------
+// ---------- Debug (toggle at runtime: ?debug=1 or localStorage.STONKY_DEBUG="1") ----------
 const RUNTIME_DEBUG =
   /(?:^|[?&])debug=1(?:$|&)/.test(location.search) ||
   localStorage.getItem("STONKY_DEBUG") === "1";
-const DEBUG =
-  RUNTIME_DEBUG || (import.meta as any).env?.VITE_DEBUG === "1";
-
+const DEBUG = RUNTIME_DEBUG || (import.meta as any).env?.VITE_DEBUG === "1";
 const toast = (window as any)?.toast || {};
 const dbg = (...a: any[]) => { if (DEBUG) console.debug("[Discover]", ...a); };
 const info = (...a: any[]) => { if (DEBUG) console.info("[Discover]", ...a); };
 const warn = (...a: any[]) => { if (DEBUG) console.warn("[Discover]", ...a); };
-window.addEventListener("unhandledrejection", (e) => {
-  if (DEBUG) console.error("[Discover] unhandledrejection:", e.reason || e);
-});
 
 // ---------- Constants ----------
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
@@ -38,20 +32,14 @@ const PAGE_SIZE = 12;
 const TX_CHUNK = 6;
 const MIN_CALL_SPACING = 250;
 
-// Local library (client-side only)
+// Local library
 const LIB_KEY = "stonky:library";
 
-// ---------- Small utils ----------
+// ---------- Utils ----------
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const jitter = (ms: number) => ms + Math.floor(Math.random() * 150);
-function is429(e: any): boolean {
-  const msg = String(e?.message || e || "");
-  return msg.includes("429") || msg.includes("Too many requests") || msg.includes("-32429");
-}
-function is401_403(e: any): boolean {
-  const msg = String(e?.message || e || "");
-  return msg.includes("401") || msg.includes("Unauthorized") || msg.includes("403") || msg.includes("Forbidden");
-}
+const is429 = (e: any) => `${e?.message || e}`.includes("429") || `${e?.message || e}`.includes("Too many requests") || `${e?.message || e}`.includes("-32429");
+const is401_403 = (e: any) => `${e?.message || e}`.includes("401") || `${e?.message || e}`.includes("Unauthorized") || `${e?.message || e}`.includes("403") || `${e?.message || e}`.includes("Forbidden");
 function withTimeout<T>(p: Promise<T>, ms = 3000): Promise<T> {
   return Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
 }
@@ -67,7 +55,7 @@ function addToLibrary(entry: { sig: string; p: PublishPayload; time: number }) {
   }
 }
 
-// ---------- Endpoint pool (configured + optional fallbacks) ----------
+// ---------- RPC pool (CONFIG only) ----------
 function corsFriendly(u: string) {
   const l = u.toLowerCase();
   if (l.includes("publicnode.com")) return false;
@@ -75,32 +63,11 @@ function corsFriendly(u: string) {
   if (l.includes("rpc.ankr.com/multichain")) return false;
   return true;
 }
-function parseList(s: unknown): string[] {
-  return String(s || "")
-    .split(",")
-    .map((x) => x.trim())
-    .filter(Boolean);
-}
-
-// Read configured base from CONFIG (env/embedded)
-function configuredBase(): string[] {
-  const { DEFAULT_CLUSTER, DEVNET_RPCS, MAINNET_RPCS } = CONFIG as any;
-  return (DEFAULT_CLUSTER === "devnet" ? DEVNET_RPCS : MAINNET_RPCS) || [];
-}
-
-// Optional read-only fallbacks from env (no config.ts change needed)
-const FALLBACK_RPCS: string[] = [
-  ...parseList((import.meta as any).env?.VITE_RPC_FALLBACKS),
-  ...parseList((window as any).__ENV__?.VITE_RPC_FALLBACKS),
-];
-
-let announcedFallback = false;
-
 function buildCandidateList(): string[] {
-  const base: string[] = configuredBase();
-  // merge base + optional fallbacks, keep order, cors-safe, dedup
+  const { DEFAULT_CLUSTER, DEVNET_RPCS, MAINNET_RPCS } = CONFIG as any;
+  const base: string[] = (DEFAULT_CLUSTER === "devnet" ? DEVNET_RPCS : MAINNET_RPCS) || [];
   const seen = new Set<string>();
-  const out = [...base, ...FALLBACK_RPCS]
+  const out = base
     .filter(Boolean)
     .filter(corsFriendly)
     .filter((u: string) => (seen.has(u) ? false : (seen.add(u), true)));
@@ -118,27 +85,20 @@ let CACHED_CONN: Connection | null = null;
 let CACHED_URL: string | null = null;
 
 function rebuildPoolIfEmpty() {
-  if (!pool.length) {
-    pool = buildCandidateList().map((url) => ({ url, cooldownUntil: 0, failScore: 0 }));
-  }
+  if (!pool.length) pool = buildCandidateList().map((url) => ({ url, cooldownUntil: 0, failScore: 0 }));
 }
 
 async function pickConn(): Promise<Connection> {
   rebuildPoolIfEmpty();
-  if (!pool.length) {
-    toast.error?.("No RPC endpoints configured.");
-    throw new Error("No RPC endpoints configured");
-  }
+  if (!pool.length) throw new Error("No CORS-friendly RPC available");
 
   const now = Date.now();
 
-  // prefer cached if not cooling down
   if (CACHED_CONN && CACHED_URL) {
     const ep = pool.find((p) => p.url === CACHED_URL);
     if (ep && ep.cooldownUntil <= now) return CACHED_CONN;
   }
 
-  // find best available (lowest failScore, not cooling)
   const order = [...pool].sort((a, b) => (a.cooldownUntil - b.cooldownUntil) || (a.failScore - b.failScore));
   for (const ep of order) {
     if (ep.cooldownUntil > now) continue;
@@ -202,7 +162,6 @@ function tryParsePayload(s: string): PublishPayload | null {
   } catch {}
   return null;
 }
-
 function memegenPreviewUrl(key: string, lines: string[]) {
   const u = new URL("https://api.memegen.link/images/preview.jpg");
   u.searchParams.set("template", key);
@@ -212,7 +171,6 @@ function memegenPreviewUrl(key: string, lines: string[]) {
   u.searchParams.set("cb", String(Date.now() % 1e9));
   return u.toString();
 }
-
 function likeLink(to: string, memeId: string, amount = 0.0001) {
   const url = new URL(`solana:${to}`);
   url.searchParams.set("amount", String(amount));
@@ -229,7 +187,7 @@ function emitProgress(phase: string, data?: Record<string, any>) {
   dbg("progress:", detail);
 }
 
-// ---------- Publish ----------
+// ---------- Publish (with optimistic UI + local library) ----------
 export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: string }) {
   const provider = (window as any).solana;
   if (!provider?.publicKey) throw new Error("Connect wallet first");
@@ -238,26 +196,15 @@ export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: 
   const payload: PublishPayload = { v: 1, t: "api", k: opts.key, l: opts.lines, wm: opts.wm, c: creator };
   emitProgress("build:start", { payload });
 
-  let conn: Connection;
-  try {
-    conn = await pickConn();
-    emitProgress("build:rpc_ready", { endpoint: (conn as any)?._rpcEndpoint });
-  } catch (e) {
+  const conn = await pickConn().catch((e) => {
     console.error("[Discover] pickConn failed:", e);
     toast.error?.("RPC unavailable. Check your Helius origin allowlist.");
     throw e;
-  }
+  });
 
-  let recent: string;
-  try {
-    const bh = await conn.getLatestBlockhash("finalized");
-    recent = bh.blockhash;
-    emitProgress("build:blockhash_ok", { blockhash: recent });
-  } catch (e) {
-    console.error("[Discover] getLatestBlockhash failed:", e);
-    toast.error?.("RPC busy. Try again.");
-    throw e;
-  }
+  const recent = await conn.getLatestBlockhash("finalized")
+    .then((bh) => (emitProgress("build:blockhash_ok", { blockhash: bh.blockhash }), bh.blockhash))
+    .catch((e) => { console.error("[Discover] getLatestBlockhash failed:", e); toast.error?.("RPC busy. Try again."); throw e; });
 
   const memoIx = new TransactionInstruction({
     programId: MEMO_PROGRAM_ID,
@@ -274,7 +221,7 @@ export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: 
   tx.feePayer = provider.publicKey;
   tx.recentBlockhash = recent;
 
-  // Send via wallet
+  // Send
   let sig = "";
   try {
     toast.info?.("Opening wallet…");
@@ -303,7 +250,7 @@ export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: 
     throw e;
   }
 
-  // Confirm (don’t block forever; rotate endpoints if hot/unauthorized)
+  // Confirm (short + rotates)
   try {
     emitProgress("confirm:start", { sig });
     await confirmSignatureSmart(sig);
@@ -313,12 +260,13 @@ export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: 
     warn("Proceeding despite confirm error.");
   }
 
+  // Optimistic card + local library
+  injectOptimisticCard(payload, sig);
+  addToLibrary({ sig, p: payload, time: Date.now() });
+
   (window as any).__lastPublish = { sig, payload, endpoint: (conn as any)?._rpcEndpoint };
   toast.success?.("Published to Discover");
   emitProgress("done", { sig });
-
-  // Save to local library
-  addToLibrary({ sig, p: payload, time: Date.now() });
 
   window.dispatchEvent(new CustomEvent("stonky:published", { detail: { sig, payload } }));
   return sig;
@@ -327,7 +275,7 @@ export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: 
 async function confirmSignatureSmart(sig: string) {
   const tried = new Set<string>();
   let attempts = 0;
-  while (attempts++ < 6) {
+  while (attempts++ < 4) {
     const conn = await pickConn();
     const ep = (conn as any)._rpcEndpoint as string;
     if (tried.has(ep)) { await sleep(350 * attempts); continue; }
@@ -343,18 +291,13 @@ async function confirmSignatureSmart(sig: string) {
       const poolEp = pool.find((p) => p.url === ep);
       if (is429(e) || is401_403(e)) {
         await sleep(backoff(poolEp, attempts));
-        if (is401_403(e) && !announcedFallback && FALLBACK_RPCS.length) {
-          announcedFallback = true;
-          toast.info?.("RPC unauthorized. Using fallback for reads/confirmations.");
-        }
+        CACHED_CONN = null; CACHED_URL = null; // rotate
       } else {
         await sleep(jitter(600));
       }
-      // rotate by invalidating cache so next loop picks another
-      CACHED_CONN = null; CACHED_URL = null;
     }
   }
-  // Soft fail — return control to caller
+  // Soft fail
 }
 
 // ---------- Discover feed ----------
@@ -398,15 +341,7 @@ async function fetchPage(before?: string, limit = PAGE_SIZE): Promise<FeedItem[]
         const ep = pool.find((p) => p.url === (conn as any)._rpcEndpoint);
         if (is429(e) || is401_403(e)) {
           await sleep(backoff(ep, tries++));
-          if (is401_403(e) && !announcedFallback && FALLBACK_RPCS.length) {
-            announcedFallback = true;
-            toast.info?.("RPC unauthorized. Using fallback for reads.");
-          }
-          if (tries > 3) {
-            // rotate connection and retry chunk with a different endpoint
-            CACHED_CONN = null; CACHED_URL = null;
-            break;
-          }
+          if (tries > 2) { CACHED_CONN = null; CACHED_URL = null; break; } // rotate after a couple tries
         } else {
           await sleep(jitter(500));
           break;
@@ -436,6 +371,38 @@ function ensureDiscoverSection(): HTMLElement {
   `;
   memeCard.parentElement?.appendChild(sec);
   return sec;
+}
+
+function injectOptimisticCard(p: PublishPayload, sig: string) {
+  const grid = document.getElementById("discover-grid");
+  if (!grid) return;
+  const id = `${p.k}-${(p.l || []).join("|")}`.slice(0, 64);
+  const src = memegenPreviewUrl(p.k, p.l);
+  const when = new Date().toLocaleString();
+  const like = likeLink(p.c, id);
+  const html = `
+    <div class="relative rounded-lg overflow-hidden border border-white/10 bg-white/5">
+      <img src="${src}" alt="${p.k}" class="w-full aspect-square object-cover" />
+      <div class="absolute right-2 bottom-2 px-2 py-1 rounded bg-black/50 text-[11px]">${p.wm || ""}</div>
+      <div class="p-2 text-[11px] text-white/70 flex items-center justify-between">
+        <span>${p.k}</span><span>${when}</span>
+      </div>
+      <div class="px-2 pb-2 flex gap-1">
+        <button class="px-2 py-1 rounded bg-white/10 border border-white/10 text-xs"
+          data-open="${encodeURIComponent(p.k)}"
+          data-lines='${encodeURIComponent(JSON.stringify(p.l || []))}'>Open</button>
+        <a class="px-2 py-1 rounded bg-white/10 border border-white/10 text-xs" href="${like}" target="_blank" rel="noopener">Like</a>
+      </div>
+    </div>`;
+  grid.insertAdjacentHTML("afterbegin", html);
+  grid.querySelector<HTMLButtonElement>("button[data-open]")?.addEventListener("click", (ev) => {
+    const b = ev.currentTarget as HTMLButtonElement;
+    const tpl = decodeURIComponent(b.dataset.open || "");
+    const lines = JSON.parse(decodeURIComponent(b.dataset.lines || "[]"));
+    window.dispatchEvent(new CustomEvent("stonky:openMeme", { detail: { tpl, lines } }));
+    toast.success?.("Loaded into editor");
+  });
+  dbg("optimistic card inserted for", sig);
 }
 
 export function initDiscoverFeed() {
