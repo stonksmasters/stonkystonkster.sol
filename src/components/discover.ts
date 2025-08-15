@@ -1,6 +1,7 @@
 // src/components/discover.ts
 // Serverless "Discover" feed via on-chain Memo, rate-limit aware RPC selection,
-// chunked reads, and robust publish path with detailed debugging + local library save.
+// chunked reads, robust publish path with detailed debugging + local library save,
+// and optional read-only fallback RPCs for resilience.
 
 import { CONFIG } from "./config";
 import {
@@ -47,6 +48,10 @@ function is429(e: any): boolean {
   const msg = String(e?.message || e || "");
   return msg.includes("429") || msg.includes("Too many requests") || msg.includes("-32429");
 }
+function is401_403(e: any): boolean {
+  const msg = String(e?.message || e || "");
+  return msg.includes("401") || msg.includes("Unauthorized") || msg.includes("403") || msg.includes("Forbidden");
+}
 function withTimeout<T>(p: Promise<T>, ms = 3000): Promise<T> {
   return Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
 }
@@ -62,7 +67,7 @@ function addToLibrary(entry: { sig: string; p: PublishPayload; time: number }) {
   }
 }
 
-// ---------- Endpoint pool (ONLY configured RPCs) ----------
+// ---------- Endpoint pool (configured + optional fallbacks) ----------
 function corsFriendly(u: string) {
   const l = u.toLowerCase();
   if (l.includes("publicnode.com")) return false;
@@ -70,11 +75,32 @@ function corsFriendly(u: string) {
   if (l.includes("rpc.ankr.com/multichain")) return false;
   return true;
 }
-function buildCandidateList(): string[] {
+function parseList(s: unknown): string[] {
+  return String(s || "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+// Read configured base from CONFIG (env/embedded)
+function configuredBase(): string[] {
   const { DEFAULT_CLUSTER, DEVNET_RPCS, MAINNET_RPCS } = CONFIG as any;
-  const base: string[] = (DEFAULT_CLUSTER === "devnet" ? DEVNET_RPCS : MAINNET_RPCS) || [];
+  return (DEFAULT_CLUSTER === "devnet" ? DEVNET_RPCS : MAINNET_RPCS) || [];
+}
+
+// Optional read-only fallbacks from env (no config.ts change needed)
+const FALLBACK_RPCS: string[] = [
+  ...parseList((import.meta as any).env?.VITE_RPC_FALLBACKS),
+  ...parseList((window as any).__ENV__?.VITE_RPC_FALLBACKS),
+];
+
+let announcedFallback = false;
+
+function buildCandidateList(): string[] {
+  const base: string[] = configuredBase();
+  // merge base + optional fallbacks, keep order, cors-safe, dedup
   const seen = new Set<string>();
-  const out = base
+  const out = [...base, ...FALLBACK_RPCS]
     .filter(Boolean)
     .filter(corsFriendly)
     .filter((u: string) => (seen.has(u) ? false : (seen.add(u), true)));
@@ -87,11 +113,18 @@ function looksLikeHelius401(err: any, url?: string) {
 }
 
 type Ep = { url: string; cooldownUntil: number; failScore: number };
-const pool: Ep[] = buildCandidateList().map((url) => ({ url, cooldownUntil: 0, failScore: 0 }));
+let pool: Ep[] = buildCandidateList().map((url) => ({ url, cooldownUntil: 0, failScore: 0 }));
 let CACHED_CONN: Connection | null = null;
 let CACHED_URL: string | null = null;
 
+function rebuildPoolIfEmpty() {
+  if (!pool.length) {
+    pool = buildCandidateList().map((url) => ({ url, cooldownUntil: 0, failScore: 0 }));
+  }
+}
+
 async function pickConn(): Promise<Connection> {
+  rebuildPoolIfEmpty();
   if (!pool.length) {
     toast.error?.("No RPC endpoints configured.");
     throw new Error("No RPC endpoints configured");
@@ -119,7 +152,7 @@ async function pickConn(): Promise<Connection> {
       return c;
     } catch (err) {
       if (looksLikeHelius401(err, ep.url)) {
-        toast.error?.("Helius denied this origin. Add your site to Allowed Origins for this API key.");
+        toast.error?.("Helius denied this origin/API key. Check Allowed Origins for your key.");
       }
       ep.failScore += 1;
       ep.cooldownUntil = now + Math.min(30_000, 3_000 * ep.failScore);
@@ -270,13 +303,12 @@ export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: 
     throw e;
   }
 
-  // Confirm (don’t block forever; rotate endpoints if hot)
+  // Confirm (don’t block forever; rotate endpoints if hot/unauthorized)
   try {
     emitProgress("confirm:start", { sig });
     await confirmSignatureSmart(sig);
     emitProgress("confirm:done", { sig });
   } catch (e) {
-    // Non-fatal: the tx likely went through; feed will eventually show it.
     console.error("[Discover] confirm failed:", e);
     warn("Proceeding despite confirm error.");
   }
@@ -308,12 +340,18 @@ async function confirmSignatureSmart(sig: string) {
       if (s?.confirmationStatus === "confirmed" || s?.confirmationStatus === "finalized") return;
       await sleep(jitter(800));
     } catch (e) {
-      if (is429(e)) {
-        const pp = pool.find((p) => p.url === ep);
-        await sleep(backoff(pp, attempts));
+      const poolEp = pool.find((p) => p.url === ep);
+      if (is429(e) || is401_403(e)) {
+        await sleep(backoff(poolEp, attempts));
+        if (is401_403(e) && !announcedFallback && FALLBACK_RPCS.length) {
+          announcedFallback = true;
+          toast.info?.("RPC unauthorized. Using fallback for reads/confirmations.");
+        }
       } else {
         await sleep(jitter(600));
       }
+      // rotate by invalidating cache so next loop picks another
+      CACHED_CONN = null; CACHED_URL = null;
     }
   }
   // Soft fail — return control to caller
@@ -357,10 +395,18 @@ async function fetchPage(before?: string, limit = PAGE_SIZE): Promise<FeedItem[]
         }
         break; // chunk ok
       } catch (e) {
-        if (is429(e)) {
-          const ep = pool.find((p) => p.url === (conn as any)._rpcEndpoint);
+        const ep = pool.find((p) => p.url === (conn as any)._rpcEndpoint);
+        if (is429(e) || is401_403(e)) {
           await sleep(backoff(ep, tries++));
-          if (tries > 3) { CACHED_CONN = null; CACHED_URL = null; break; }
+          if (is401_403(e) && !announcedFallback && FALLBACK_RPCS.length) {
+            announcedFallback = true;
+            toast.info?.("RPC unauthorized. Using fallback for reads.");
+          }
+          if (tries > 3) {
+            // rotate connection and retry chunk with a different endpoint
+            CACHED_CONN = null; CACHED_URL = null;
+            break;
+          }
         } else {
           await sleep(jitter(500));
           break;
