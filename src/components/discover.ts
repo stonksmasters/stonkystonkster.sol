@@ -1,6 +1,6 @@
 // src/components/discover.ts
 // Serverless "Discover" feed via on-chain Memo, rate-limit aware RPC selection,
-// chunked reads, and robust publish path with detailed debugging.
+// chunked reads, and robust publish path with detailed debugging + local library save.
 
 import { CONFIG } from "./config";
 import {
@@ -12,12 +12,20 @@ import {
 } from "@solana/web3.js";
 import { Buffer } from "buffer";
 
-// ---------- Debug ----------
-const DEBUG = (import.meta as any).env?.VITE_DEBUG === "1";
+// ---------- Debug (runtime-friendly) ----------
+const RUNTIME_DEBUG =
+  /(?:^|[?&])debug=1(?:$|&)/.test(location.search) ||
+  localStorage.getItem("STONKY_DEBUG") === "1";
+const DEBUG =
+  RUNTIME_DEBUG || (import.meta as any).env?.VITE_DEBUG === "1";
+
 const toast = (window as any)?.toast || {};
 const dbg = (...a: any[]) => { if (DEBUG) console.debug("[Discover]", ...a); };
 const info = (...a: any[]) => { if (DEBUG) console.info("[Discover]", ...a); };
 const warn = (...a: any[]) => { if (DEBUG) console.warn("[Discover]", ...a); };
+window.addEventListener("unhandledrejection", (e) => {
+  if (DEBUG) console.error("[Discover] unhandledrejection:", e.reason || e);
+});
 
 // ---------- Constants ----------
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
@@ -29,6 +37,9 @@ const PAGE_SIZE = 12;
 const TX_CHUNK = 6;
 const MIN_CALL_SPACING = 250;
 
+// Local library (client-side only)
+const LIB_KEY = "stonky:library";
+
 // ---------- Small utils ----------
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const jitter = (ms: number) => ms + Math.floor(Math.random() * 150);
@@ -38,6 +49,17 @@ function is429(e: any): boolean {
 }
 function withTimeout<T>(p: Promise<T>, ms = 3000): Promise<T> {
   return Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
+}
+function addToLibrary(entry: { sig: string; p: PublishPayload; time: number }) {
+  try {
+    const cur = JSON.parse(localStorage.getItem(LIB_KEY) || "[]");
+    const next = [entry, ...cur].slice(0, 500);
+    localStorage.setItem(LIB_KEY, JSON.stringify(next));
+    window.dispatchEvent(new CustomEvent("stonky:libraryUpdated", { detail: { size: next.length } }));
+    dbg("library+1", entry.sig, entry.p);
+  } catch (e) {
+    warn("library save failed", e);
+  }
 }
 
 // ---------- Endpoint pool (ONLY configured RPCs) ----------
@@ -52,7 +74,10 @@ function buildCandidateList(): string[] {
   const { DEFAULT_CLUSTER, DEVNET_RPCS, MAINNET_RPCS } = CONFIG as any;
   const base: string[] = (DEFAULT_CLUSTER === "devnet" ? DEVNET_RPCS : MAINNET_RPCS) || [];
   const seen = new Set<string>();
-  const out = base.filter(Boolean).filter(corsFriendly).filter((u: string) => (seen.has(u) ? false : (seen.add(u), true)));
+  const out = base
+    .filter(Boolean)
+    .filter(corsFriendly)
+    .filter((u: string) => (seen.has(u) ? false : (seen.add(u), true)));
   dbg("RPC candidates:", out);
   return out;
 }
@@ -67,13 +92,20 @@ let CACHED_CONN: Connection | null = null;
 let CACHED_URL: string | null = null;
 
 async function pickConn(): Promise<Connection> {
+  if (!pool.length) {
+    toast.error?.("No RPC endpoints configured.");
+    throw new Error("No RPC endpoints configured");
+  }
+
   const now = Date.now();
 
+  // prefer cached if not cooling down
   if (CACHED_CONN && CACHED_URL) {
     const ep = pool.find((p) => p.url === CACHED_URL);
     if (ep && ep.cooldownUntil <= now) return CACHED_CONN;
   }
 
+  // find best available (lowest failScore, not cooling)
   const order = [...pool].sort((a, b) => (a.cooldownUntil - b.cooldownUntil) || (a.failScore - b.failScore));
   for (const ep of order) {
     if (ep.cooldownUntil > now) continue;
@@ -212,6 +244,7 @@ export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: 
   // Send via wallet
   let sig = "";
   try {
+    toast.info?.("Opening wallet…");
     if (typeof provider.signAndSendTransaction === "function") {
       emitProgress("wallet:signing", { mode: "signAndSendTransaction" });
       const res = await provider.signAndSendTransaction(tx);
@@ -225,6 +258,7 @@ export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: 
       sig = await conn.sendRawTransaction(signed.serialize(), { skipPreflight: true });
     }
     emitProgress("wallet:signed", { sig });
+    toast.info?.("Submitted. Waiting for confirmation…");
   } catch (e) {
     if (String(e).includes("User rejected")) {
       info("wallet rejected by user");
@@ -250,6 +284,9 @@ export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: 
   (window as any).__lastPublish = { sig, payload, endpoint: (conn as any)?._rpcEndpoint };
   toast.success?.("Published to Discover");
   emitProgress("done", { sig });
+
+  // Save to local library
+  addToLibrary({ sig, p: payload, time: Date.now() });
 
   window.dispatchEvent(new CustomEvent("stonky:published", { detail: { sig, payload } }));
   return sig;
@@ -356,6 +393,7 @@ function ensureDiscoverSection(): HTMLElement {
 }
 
 export function initDiscoverFeed() {
+  info("init discover feed");
   ensureDiscoverSection();
   const grid = document.getElementById("discover-grid")!;
   const more = document.getElementById("discover-more")! as HTMLButtonElement;
