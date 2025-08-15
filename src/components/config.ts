@@ -48,17 +48,13 @@ export const CONFIG = {
         ];
   })(),
 
-  MAINNET_RPCS: (() => {
-    const v = env("VITE_RPC_MAINNET", "");
-    return v
-      ? parseList(v)
-      : [
-          "https://rpc.ankr.com/solana",
-          "https://solana.drpc.org",
-          "https://api.mainnet-beta.solana.com",
-          "https://solana-api.projectserum.com",
-        ];
-  })(),
+MAINNET_RPCS: (() => {
+  const v = env("VITE_RPC_MAINNET", "");
+  return v ? parseList(v) : [
+    "https://mainnet.helius-rpc.com/?api-key=41701dab-24cf-4c52-8583-b60a3a8ddaac"
+  ];
+})(),
+
 
   // Meme API key if you add one (optional)
   MEMEGEN_API_KEY: env("VITE_MEMEGEN_API_KEY", ""),

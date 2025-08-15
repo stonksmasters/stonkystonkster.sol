@@ -1,5 +1,5 @@
 // src/components/discover.ts
-// Serverless "Discover" feed via on-chain Memo, + publish handler.
+// Serverless "Discover" feed via on-chain Memo, + publish handler with CORS-safe RPC selection.
 
 import { CONFIG } from "./config";
 import {
@@ -9,36 +9,69 @@ import {
   Transaction,
   TransactionInstruction,
 } from "@solana/web3.js";
+import { Buffer } from "buffer";
 
+// ---------- Constants ----------
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 const REGISTRY_PK = new PublicKey((CONFIG as any).PUBLISH_REGISTRY || (CONFIG as any).OWNER_WALLET);
-
-function chooseEndpoint(): string {
-  const { DEFAULT_CLUSTER, DEVNET_RPCS, MAINNET_RPCS } = CONFIG as any;
-  const list = DEFAULT_CLUSTER === "devnet" ? DEVNET_RPCS : MAINNET_RPCS;
-  const filtered = list.filter((u: string) => {
-    const l = u.toLowerCase();
-    if (l.includes("solana.drpc.org")) return false;
-    if (l.includes("rpc.ankr.com/multichain")) return false;
-    if (l.includes("helius-rpc.com")) return false; // avoid auth lock in dev/preview
-    return true;
-  });
-  return filtered[0] || list[0];
-}
-function conn(): Connection {
-  return new Connection(chooseEndpoint(), { commitment: "confirmed" });
-}
-
-type PublishPayload = {
-  v: 1;
-  t: "api";
-  k: string;     // template key
-  l: string[];   // lines
-  wm?: string;   // watermark label
-  c: string;     // creator pubkey
-};
 const enc = new TextEncoder();
 
+type PublishPayload = { v: 1; t: "api"; k: string; l: string[]; wm?: string; c: string };
+type FeedItem = { sig: string; slot: number; time: number; p: PublishPayload };
+
+// ---------- Utils ----------
+function withTimeout<T>(p: Promise<T>, ms = 2500): Promise<T> {
+  return Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
+}
+
+function corsFriendly(u: string) {
+  const l = u.toLowerCase();
+  // Exclude endpoints that commonly break CORS in browsers
+  if (l.includes("publicnode.com")) return false;
+  if (l.includes("solana.drpc.org")) return false;
+  if (l.includes("rpc.ankr.com/multichain")) return false; // not Solana JSON-RPC
+  return true;
+}
+
+// Build a probe list: your configured list first, then safe fallbacks
+function buildProbeList(): string[] {
+  const { DEFAULT_CLUSTER, DEVNET_RPCS, MAINNET_RPCS } = CONFIG as any;
+  const base = (DEFAULT_CLUSTER === "devnet" ? DEVNET_RPCS : MAINNET_RPCS) || [];
+  const extra = [
+    "https://api.mainnet-beta.solana.com",
+    "https://rpc.ankr.com/solana",
+    "https://api.devnet.solana.com", // harmless if mainnet; just filtered out by cluster usage
+  ];
+  const seen = new Set<string>();
+  return [...base, ...extra]
+    .filter(Boolean)
+    .filter((u) => corsFriendly(u))
+    .filter((u) => (seen.has(u) ? false : (seen.add(u), true)));
+}
+
+let CACHED_ENDPOINT: string | null = null;
+let CACHED_CONN: Connection | null = null;
+
+// Probe endpoints until one responds to getLatestBlockhash; cache the winner
+async function getConn(): Promise<Connection> {
+  if (CACHED_CONN) return CACHED_CONN;
+  const candidates = buildProbeList();
+  for (const url of candidates) {
+    try {
+      const c = new Connection(url, { commitment: "confirmed" });
+      await withTimeout(c.getLatestBlockhash("finalized"), 3000); // probe
+      CACHED_ENDPOINT = url;
+      CACHED_CONN = c;
+      // console.debug("[Discover] Using RPC:", url);
+      return c;
+    } catch {
+      // try next
+    }
+  }
+  throw new Error("No CORS-friendly Solana RPC available");
+}
+
+// ---------- Payload helpers ----------
 function encodePayload(p: PublishPayload): string {
   const safe: PublishPayload = {
     v: 1,
@@ -57,42 +90,6 @@ function tryParsePayload(s: string): PublishPayload | null {
   } catch {}
   return null;
 }
-
-// --- Public: called via event from meme.ts
-async function publishMemeApi(opts: { key: string; lines: string[]; wm?: string }) {
-  const provider = (window as any).solana;
-  if (!provider?.publicKey) throw new Error("Connect wallet first");
-
-  const creator = provider.publicKey.toBase58();
-  const payload: PublishPayload = { v: 1, t: "api", k: opts.key, l: opts.lines, wm: opts.wm, c: creator };
-
-const memoIx = new TransactionInstruction({
-  programId: MEMO_PROGRAM_ID,
-  keys: [],
-  // Convert Uint8Array → Buffer to satisfy type requirement
-  data: Buffer.from(enc.encode(encodePayload(payload))),
-});
-
-const zeroIx = SystemProgram.transfer({
-  fromPubkey: provider.publicKey,
-  toPubkey: REGISTRY_PK,
-  lamports: 0,
-});
-
-  const c = conn();
-  const tx = new Transaction().add(zeroIx, memoIx);
-  tx.feePayer = provider.publicKey;
-  tx.recentBlockhash = (await c.getLatestBlockhash("finalized")).blockhash;
-
-  const signed = await provider.signTransaction(tx);
-  const sig = await c.sendRawTransaction(signed.serialize(), { skipPreflight: true });
-  await c.confirmTransaction(sig, "confirmed");
-
-  (window as any)?.toast?.success?.("Published to Discover");
-  window.dispatchEvent(new CustomEvent("stonky:published", { detail: { sig, payload } }));
-}
-
-type FeedItem = { sig: string; slot: number; time: number; p: PublishPayload };
 
 function memegenPreviewUrl(key: string, lines: string[]) {
   const u = new URL("https://api.memegen.link/images/preview.jpg");
@@ -113,8 +110,50 @@ function likeLink(to: string, memeId: string, amount = 0.0001) {
   return url.toString();
 }
 
+// ---------- Public: publish API meme ----------
+export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: string }) {
+  const provider = (window as any).solana;
+  if (!provider?.publicKey) throw new Error("Connect wallet first");
+
+  const creator = provider.publicKey.toBase58();
+  const payload: PublishPayload = { v: 1, t: "api", k: opts.key, l: opts.lines, wm: opts.wm, c: creator };
+
+  const memoIx = new TransactionInstruction({
+    programId: MEMO_PROGRAM_ID,
+    keys: [],
+    data: Buffer.from(enc.encode(encodePayload(payload))), // Uint8Array -> Buffer
+  });
+  const zeroIx = SystemProgram.transfer({
+    fromPubkey: provider.publicKey,
+    toPubkey: REGISTRY_PK,
+    lamports: 0,
+  });
+
+  const c = await getConn();
+  const tx = new Transaction().add(zeroIx, memoIx);
+  tx.feePayer = provider.publicKey;
+  tx.recentBlockhash = (await c.getLatestBlockhash("finalized")).blockhash;
+
+  // Prefer wallet sending (handles RPC nuances), but still confirm via our conn
+  if (typeof provider.signAndSendTransaction === "function") {
+    const { signature } = await provider.signAndSendTransaction(tx);
+    await c.confirmTransaction(signature, "confirmed");
+    (window as any)?.toast?.success?.("Published to Discover");
+    window.dispatchEvent(new CustomEvent("stonky:published", { detail: { sig: signature, payload } }));
+    return signature;
+  } else {
+    const signed = await provider.signTransaction(tx);
+    const sig = await c.sendRawTransaction(signed.serialize(), { skipPreflight: true });
+    await c.confirmTransaction(sig, "confirmed");
+    (window as any)?.toast?.success?.("Published to Discover");
+    window.dispatchEvent(new CustomEvent("stonky:published", { detail: { sig, payload } }));
+    return sig;
+  }
+}
+
+// ---------- Discover feed ----------
 async function fetchPage(before?: string, limit = 24): Promise<FeedItem[]> {
-  const c = conn();
+  const c = await getConn();
   const sigs = await c.getSignaturesForAddress(REGISTRY_PK, before ? { before, limit } : { limit });
   if (!sigs.length) return [];
   const sigList = sigs.map((s) => s.signature);
@@ -126,7 +165,6 @@ async function fetchPage(before?: string, limit = 24): Promise<FeedItem[]> {
     const sig = sigList[i];
     if (!tx) continue;
 
-    // Memo program logs the memo string
     let memoStr = "";
     const logs = (tx.meta as any)?.logMessages || [];
     const lastLog = logs.filter((m: string) => m?.startsWith("Program log: ")).pop();
@@ -141,7 +179,6 @@ async function fetchPage(before?: string, limit = 24): Promise<FeedItem[]> {
   return out.sort((a, b) => b.slot - a.slot);
 }
 
-// ---------- UI ----------
 function ensureDiscoverSection(): HTMLElement {
   let sec = document.getElementById("discover");
   if (sec) return sec;
@@ -172,13 +209,14 @@ export function initDiscoverFeed() {
   async function loadMore() {
     if (loading) return;
     loading = true; more.disabled = true;
+
     try {
       const page = await fetchPage(lastSig, 24);
       if (!page.length) { more.textContent = "No more"; return; }
       lastSig = page[page.length - 1].sig;
 
       const cards = page.map((it) => {
-        const id = `${it.p.k}-${(it.p.l || []).join("|")}`.slice(0, 64); // UI-only id
+        const id = `${it.p.k}-${(it.p.l || []).join("|")}`.slice(0, 64);
         const src = memegenPreviewUrl(it.p.k, it.p.l);
         const when = it.time ? new Date(it.time).toLocaleString() : "";
         const like = likeLink(it.p.c, id);
@@ -207,9 +245,17 @@ export function initDiscoverFeed() {
           (window as any)?.toast?.success?.("Loaded into editor");
         });
       });
-    } finally { loading = false; more.disabled = false; }
+    } catch (err) {
+      console.error("[Discover] Failed to load page:", err);
+      (window as any)?.toast?.error?.("RPC unavailable. Trying again…");
+      // Drop cached endpoint so next click will probe anew
+      CACHED_ENDPOINT = null; CACHED_CONN = null;
+    } finally {
+      loading = false; more.disabled = false;
+    }
   }
 
+  // First page
   loadMore();
   more.addEventListener("click", loadMore);
 
@@ -217,6 +263,11 @@ export function initDiscoverFeed() {
   window.addEventListener("stonky:publishMeme", async (e: any) => {
     const { key, lines, wm } = e?.detail || {};
     try { await publishMemeApi({ key, lines, wm }); }
-    catch (err) { (window as any)?.toast?.error?.("Publish failed"); console.error(err); }
+    catch (err) {
+      console.error("[Discover] Publish failed:", err);
+      (window as any)?.toast?.error?.("Publish failed (RPC).");
+      // Invalidate cache so next attempt re-probes RPCs
+      CACHED_ENDPOINT = null; CACHED_CONN = null;
+    }
   });
 }
