@@ -2,7 +2,6 @@
 
 // Polyfills first (Buffer, etc.)
 import "./polyfills";
-import "./styles/tailwind.css";
 
 // App modules
 import { CONFIG } from "./components/config";

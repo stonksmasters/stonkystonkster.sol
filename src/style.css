@@ -1,3 +1,9 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+
+
 
 /* Your custom tokens + styles (what made it pretty) */
 :root { --accent-from:#9945FF; --accent-to:#14F195; }
