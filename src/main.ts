@@ -18,14 +18,55 @@ declare global {
   }
 }
 
-// ----- Helpers for watermark label from wallet -----
+// ---------- Wallet label helpers ----------
 function shorten(pk: string) {
   return pk && pk.length > 10 ? `${pk.slice(0, 4)}…${pk.slice(-4)}` : pk;
 }
 
-// If you later add an SNS reverse resolver, call setMemeWatermark()
-// with the resolved domain and it will override this fallback.
-function computeWalletLabel(): string {
+async function withTimeout<T>(p: Promise<T>, ms = 2500): Promise<T> {
+  return await Promise.race([
+    p,
+    new Promise<T>((_, rej) => setTimeout(() => rej(new Error("timeout")), ms)),
+  ]);
+}
+
+// Best-effort SNS reverse lookup (quietly falls back if anything fails)
+async function tryResolveSnsReverse(address: string): Promise<string | null> {
+  if (!address) return null;
+
+  // Endpoint A: Bonfida SNS proxy
+  const endpointA = `https://sns-sdk-proxy.bonfida.com/resolve_reverse?address=${encodeURIComponent(address)}`;
+  // Endpoint B: alt reverse service (shape may vary; we just look for a .sol string)
+  const endpointB = `https://names.solana.com/v1/reverse/${encodeURIComponent(address)}`;
+
+  const tryOne = async (url: string) => {
+    const r = await withTimeout(fetch(url, { mode: "cors", credentials: "omit" }));
+    if (!r.ok) throw new Error(`bad ${r.status}`);
+    const j: any = await r.json().catch(() => ({}));
+    // Try a few likely shapes
+    const vals = [
+      j?.domain,
+      j?.reverse,
+      j?.name,
+      j?.result,
+      typeof j === "string" ? j : null,
+    ].filter(Boolean) as string[];
+    const hit = vals.find((s) => typeof s === "string" && s.toLowerCase().endsWith(".sol"));
+    return hit || null;
+  };
+
+  try {
+    const a = await tryOne(endpointA);
+    if (a) return a;
+  } catch {}
+  try {
+    const b = await tryOne(endpointB);
+    if (b) return b;
+  } catch {}
+  return null;
+}
+
+function computeWalletLabelSync(): string {
   try {
     const pk = window.solana?.publicKey?.toBase58?.() ?? "";
     return pk ? shorten(pk) : "";
@@ -39,14 +80,19 @@ function initWalletWatermarkBinding() {
   // Default watermark (site owner) until a user connects
   setMemeWatermark(CONFIG.OWNER_SOL_DOMAIN || "");
 
-  const applyFromWallet = () => {
-    const label = computeWalletLabel();
-    if (label) setMemeWatermark(label);
+  const applyFromWallet = async () => {
+    const pk = window.solana?.publicKey?.toBase58?.();
+    if (!pk) {
+      setMemeWatermark(CONFIG.OWNER_SOL_DOMAIN || "");
+      return;
+    }
+    // Try SNS reverse; fallback to shortened pubkey
+    const domain = await tryResolveSnsReverse(pk).catch(() => null);
+    setMemeWatermark(domain || shorten(pk));
   };
 
-  // Support a nicer label pushed from elsewhere (e.g., SNS resolver)
-  // Usage from any module:
-  //   window.dispatchEvent(new CustomEvent("stonky:walletLabel", { detail: { label: "alice.sol" } }));
+  // Support a nicer label pushed from elsewhere (e.g., your own SNS resolver)
+  // window.dispatchEvent(new CustomEvent("stonky:walletLabel", { detail: { label: "alice.sol" } }));
   window.addEventListener("stonky:walletLabel", (e: any) => {
     const label = e?.detail?.label;
     if (typeof label === "string" && label.trim()) {
@@ -63,12 +109,8 @@ function initWalletWatermarkBinding() {
     // Phantom events
     prov.on?.("connect", applyFromWallet);
     prov.on?.("accountChanged", (pubkey: any) => {
-      if (pubkey) {
-        applyFromWallet();
-      } else {
-        // Locked / no account available
-        setMemeWatermark(CONFIG.OWNER_SOL_DOMAIN || "");
-      }
+      if (pubkey) applyFromWallet();
+      else setMemeWatermark(CONFIG.OWNER_SOL_DOMAIN || "");
     });
     prov.on?.("disconnect", () => {
       setMemeWatermark(CONFIG.OWNER_SOL_DOMAIN || "");
@@ -89,7 +131,7 @@ function initWalletWatermarkBinding() {
   }
 }
 
-// ----- Pick a good RPC for Jupiter (runtime+build friendly) -----
+// ---------- Pick a good RPC for Jupiter (runtime+build friendly) ----------
 function chooseJupiterEndpoint(): string | undefined {
   const cluster = CONFIG.DEFAULT_CLUSTER; // "devnet" | "mainnet"
   const list = cluster === "devnet" ? CONFIG.DEVNET_RPCS : CONFIG.MAINNET_RPCS;
@@ -107,7 +149,7 @@ function chooseJupiterEndpoint(): string | undefined {
   return helius || filtered[0]; // If none, Jupiter will fall back internally if endpoint is undefined
 }
 
-// ----- Jupiter Plugin (integrated mode) -----
+// ---------- Jupiter Plugin (integrated mode) ----------
 function initJupiterPlugin() {
   const containerId = "jup-widget";
   const el = document.getElementById(containerId);
@@ -133,7 +175,6 @@ function initJupiterPlugin() {
         passThroughWallet: window.solana ?? undefined, // reuse Phantom if connected
       });
     } catch (e) {
-      // Don't let plugin init throw crash the page
       console.warn("[Jupiter] init failed:", e);
     }
 
@@ -149,7 +190,7 @@ function initJupiterPlugin() {
   }
 }
 
-// ----- Boot -----
+// ---------- Boot ----------
 document.addEventListener("DOMContentLoaded", () => {
   // Boot order unchanged
   initConnection();   // RPC pool + backoff (also reads CONFIG lists)
@@ -157,6 +198,6 @@ document.addEventListener("DOMContentLoaded", () => {
   initMemeGen();      // Meme Shrine
   initJupiterPlugin();
 
-  // Bind watermark ↔ wallet
+  // Bind watermark ↔ wallet (+ SNS reverse)
   initWalletWatermarkBinding();
 });
