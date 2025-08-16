@@ -1,6 +1,9 @@
 // src/components/discover.ts
-// Serverless "Discover" via Memo: uses only CONFIG RPCs, rotates on 401/403/429,
-// adds optimistic UI on publish, and saves to a local library.
+// Serverless "Discover" via Memo.
+// IMPORTANT: No batch RPC calls (compatible with Helius free plan).
+// - Uses only CONFIG RPCs
+// - Single-request fetch per signature (throttled) with raw→parsed fallback
+// - Robust publish flow + optimistic card + local library
 
 import { CONFIG } from "./config";
 import {
@@ -12,7 +15,7 @@ import {
 } from "@solana/web3.js";
 import { Buffer } from "buffer";
 
-// ---------- Debug (toggle at runtime: ?debug=1 or localStorage.STONKY_DEBUG="1") ----------
+// ---------- Debug ----------
 const RUNTIME_DEBUG =
   /(?:^|[?&])debug=1(?:$|&)/.test(location.search) ||
   localStorage.getItem("STONKY_DEBUG") === "1";
@@ -29,8 +32,8 @@ const enc = new TextEncoder();
 
 // UI + paging
 const PAGE_SIZE = 12;
-const TX_CHUNK = 6;
-const MIN_CALL_SPACING = 250;
+// Soft client-side rate limit between *RPC* calls
+const MIN_CALL_SPACING = 300; // a touch higher to be kind to free plans
 
 // Local library
 const LIB_KEY = "stonky:library";
@@ -38,9 +41,19 @@ const LIB_KEY = "stonky:library";
 // ---------- Utils ----------
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const jitter = (ms: number) => ms + Math.floor(Math.random() * 150);
-const is429 = (e: any) => `${e?.message || e}`.includes("429") || `${e?.message || e}`.includes("Too many requests") || `${e?.message || e}`.includes("-32429");
-const is401_403 = (e: any) => `${e?.message || e}`.includes("401") || `${e?.message || e}`.includes("Unauthorized") || `${e?.message || e}`.includes("403") || `${e?.message || e}`.includes("Forbidden");
-function withTimeout<T>(p: Promise<T>, ms = 3000): Promise<T> {
+function is429(e: unknown): boolean {
+  const msg = String((e as any)?.message || e || "");
+  return msg.includes("429") || msg.includes("Too many requests") || msg.includes("-32429");
+}
+function is401_403(e: unknown): boolean {
+  const msg = String((e as any)?.message || e || "");
+  return msg.includes("401") || msg.includes("Unauthorized") || msg.includes("403") || msg.includes("Forbidden");
+}
+function isLongTermStorageErr(e: unknown): boolean {
+  const msg = String((e as any)?.message || e || "");
+  return msg.includes("Failed to query long-term storage");
+}
+function withTimeout<T>(p: Promise<T>, ms = 3500): Promise<T> {
   return Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
 }
 function addToLibrary(entry: { sig: string; p: PublishPayload; time: number }) {
@@ -50,9 +63,7 @@ function addToLibrary(entry: { sig: string; p: PublishPayload; time: number }) {
     localStorage.setItem(LIB_KEY, JSON.stringify(next));
     window.dispatchEvent(new CustomEvent("stonky:libraryUpdated", { detail: { size: next.length } }));
     dbg("library+1", entry.sig, entry.p);
-  } catch (e) {
-    warn("library save failed", e);
-  }
+  } catch (e) { warn("library save failed", e); }
 }
 
 // ---------- RPC pool (CONFIG only) ----------
@@ -74,11 +85,6 @@ function buildCandidateList(): string[] {
   dbg("RPC candidates:", out);
   return out;
 }
-function looksLikeHelius401(err: any, url?: string) {
-  const msg = String(err?.message || err || "");
-  return !!(url && url.includes("helius-rpc.com") && (msg.includes("401") || msg.includes("Unauthorized")));
-}
-
 type Ep = { url: string; cooldownUntil: number; failScore: number };
 let pool: Ep[] = buildCandidateList().map((url) => ({ url, cooldownUntil: 0, failScore: 0 }));
 let CACHED_CONN: Connection | null = null;
@@ -86,6 +92,10 @@ let CACHED_URL: string | null = null;
 
 function rebuildPoolIfEmpty() {
   if (!pool.length) pool = buildCandidateList().map((url) => ({ url, cooldownUntil: 0, failScore: 0 }));
+}
+function looksLikeHelius401(err: unknown, url?: string) {
+  const msg = String((err as any)?.message || err || "");
+  return !!(url && url.includes("helius-rpc.com") && (msg.includes("401") || msg.includes("Unauthorized")));
 }
 
 async function pickConn(): Promise<Connection> {
@@ -112,7 +122,7 @@ async function pickConn(): Promise<Connection> {
       return c;
     } catch (err) {
       if (looksLikeHelius401(err, ep.url)) {
-        toast.error?.("Helius denied this origin/API key. Check Allowed Origins for your key.");
+        toast.error?.("Helius denied this origin/API key. Check Allowed Origins or plan limits.");
       }
       ep.failScore += 1;
       ep.cooldownUntil = now + Math.min(30_000, 3_000 * ep.failScore);
@@ -120,16 +130,6 @@ async function pickConn(): Promise<Connection> {
     }
   }
   throw new Error("No CORS-friendly RPC available");
-}
-
-function backoff(ep?: Ep, attempt = 0) {
-  const base = [500, 1000, 2000, 4000, 6000][Math.min(attempt, 4)];
-  const wait = jitter(base);
-  if (ep) {
-    ep.failScore += 1;
-    ep.cooldownUntil = Date.now() + Math.min(60_000, base * 3);
-  }
-  return wait;
 }
 
 // Soft client-side rate limiter
@@ -187,7 +187,7 @@ function emitProgress(phase: string, data?: Record<string, any>) {
   dbg("progress:", detail);
 }
 
-// ---------- Publish (with optimistic UI + local library) ----------
+// ---------- Publish (optimistic UI + library) ----------
 export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: string }) {
   const provider = (window as any).solana;
   if (!provider?.publicKey) throw new Error("Connect wallet first");
@@ -288,23 +288,20 @@ async function confirmSignatureSmart(sig: string) {
       if (s?.confirmationStatus === "confirmed" || s?.confirmationStatus === "finalized") return;
       await sleep(jitter(800));
     } catch (e) {
-      const poolEp = pool.find((p) => p.url === ep);
-      if (is429(e) || is401_403(e)) {
-        await sleep(backoff(poolEp, attempts));
-        CACHED_CONN = null; CACHED_URL = null; // rotate
-      } else {
-        await sleep(jitter(600));
-      }
+      // 429/401/403: brief backoff + rotate on next iter
+      await sleep(is429(e) || is401_403(e) ? jitter(800) : jitter(500));
+      CACHED_CONN = null; CACHED_URL = null;
     }
   }
-  // Soft fail
+  // soft fail
 }
 
-// ---------- Discover feed ----------
+// ---------- Discover feed (NO BATCH) ----------
 async function fetchPage(before?: string, limit = PAGE_SIZE): Promise<FeedItem[]> {
   const conn = await pickConn();
   await rateLimitPause();
 
+  // Cheap signatures fetch
   const sigs = await conn.getSignaturesForAddress(
     REGISTRY_PK,
     before ? { before, limit } : { limit },
@@ -312,46 +309,87 @@ async function fetchPage(before?: string, limit = PAGE_SIZE): Promise<FeedItem[]
   dbg("page sigs:", sigs.length);
   if (!sigs.length) return [];
 
+  // One-by-one tx fetch (raw → parsed fallback), throttled
   const out: FeedItem[] = [];
-  const list = sigs.map((s) => s.signature);
-  for (let i = 0; i < list.length; i += TX_CHUNK) {
-    const chunk = list.slice(i, i + TX_CHUNK);
-    let tries = 0;
-    for (;;) {
-      try {
-        await rateLimitPause();
-        const txs = await withTimeout(conn.getTransactions(chunk, { maxSupportedTransactionVersion: 0 }), 6000);
-        for (let j = 0; j < txs.length; j++) {
-          const tx = txs[j];
-          const sig = chunk[j];
-          if (!tx) continue;
-
-          let memoStr = "";
-          const logs = (tx.meta as any)?.logMessages || [];
-          const lastLog = logs.filter((m: string) => m?.startsWith("Program log: ")).pop();
-          if (lastLog) memoStr = lastLog.slice("Program log: ".length);
-          else if ((tx.meta as any)?.memo) memoStr = String((tx.meta as any).memo);
-
-          const p = tryParsePayload(memoStr);
-          if (!p) continue;
-          out.push({ sig, slot: tx.slot, time: (tx.blockTime || 0) * 1000, p });
-        }
-        break; // chunk ok
-      } catch (e) {
-        const ep = pool.find((p) => p.url === (conn as any)._rpcEndpoint);
-        if (is429(e) || is401_403(e)) {
-          await sleep(backoff(ep, tries++));
-          if (tries > 2) { CACHED_CONN = null; CACHED_URL = null; break; } // rotate after a couple tries
-        } else {
-          await sleep(jitter(500));
-          break;
-        }
-      }
+  for (const s of sigs) {
+    const sig = s.signature;
+    try {
+      await rateLimitPause();
+      const item = await fetchOneTx(conn, sig);
+      if (item) out.push(item);
+    } catch (e) {
+      // don’t bomb whole page; just log and continue
+      dbg("tx fetch failed", sig, e);
+      // rotate on persistent auth/rate errors
+      if (is401_403(e) || is429(e)) { CACHED_CONN = null; CACHED_URL = null; }
     }
-    if (!CACHED_CONN) await pickConn();
   }
 
   return out.sort((a, b) => b.slot - a.slot);
+}
+
+type OneTx = FeedItem | null;
+
+// Single-call tx fetch with fallback to parsed when necessary
+async function fetchOneTx(conn: Connection, sig: string): Promise<OneTx> {
+  // A) try raw
+  try {
+    const tx = await withTimeout(conn.getTransaction(sig, { maxSupportedTransactionVersion: 0 }), 6000);
+    if (tx) {
+      const memo = extractMemoFromRaw(tx as any);
+      const p = tryParsePayload(memo);
+      if (p) {
+        return { sig, slot: (tx as any).slot, time: ((tx as any).blockTime || 0) * 1000, p };
+      }
+    }
+  } catch (e) {
+    if (!(is401_403(e) || is429(e) || isLongTermStorageErr(e) || String(e).includes("timeout"))) {
+      // Non-retryable error; bail
+      throw e;
+    }
+  }
+
+  // B) fallback parsed
+  try {
+    await rateLimitPause();
+    const ptx = await withTimeout(conn.getParsedTransaction(sig, { maxSupportedTransactionVersion: 0 }), 6000);
+    if (ptx) {
+      const memo = extractMemoFromParsed(ptx as any);
+      const p = tryParsePayload(memo);
+      if (p) {
+        return { sig, slot: (ptx as any).slot, time: ((ptx as any).blockTime || 0) * 1000, p };
+      }
+    }
+  } catch (e) {
+    if (is401_403(e)) {
+      // plan limitation; rethrow to let caller rotate endpoint
+      throw e;
+    }
+  }
+
+  return null;
+}
+
+function extractMemoFromRaw(tx: any): string {
+  const logs: string[] = (tx?.meta?.logMessages || []);
+  const lastLog = logs.filter((m) => m?.startsWith("Program log: ")).pop();
+  if (lastLog) return lastLog.slice("Program log: ".length);
+  if (tx?.meta?.memo) return String(tx.meta.memo);
+  return "";
+}
+function extractMemoFromParsed(ptx: any): string {
+  const ixs: any[] = (ptx?.transaction?.message?.instructions || []);
+  const ix = ixs.find((ii) =>
+    (ii?.program === "spl-memo") ||
+    (ii?.programId?.toBase58?.() === MEMO_PROGRAM_ID.toBase58()) ||
+    (ii?.programId === MEMO_PROGRAM_ID.toBase58())
+  );
+  if (!ix) return "";
+  if (typeof ix?.parsed === "string") return ix.parsed;
+  if (typeof ix?.data === "string") {
+    try { return new TextDecoder().decode(Buffer.from(ix.data, "base64")); } catch {}
+  }
+  return "";
 }
 
 function ensureDiscoverSection(): HTMLElement {
@@ -455,7 +493,7 @@ export function initDiscoverFeed() {
       });
     } catch (err) {
       console.error("[Discover] Failed to load page:", err);
-      toast.error?.("RPC busy / unauthorized. Check your Helius origin allowlist.");
+      toast.error?.("RPC busy / unauthorized. Check your Helius origin + plan.");
       CACHED_CONN = null; CACHED_URL = null;
     } finally {
       loading = false; more.disabled = false;
