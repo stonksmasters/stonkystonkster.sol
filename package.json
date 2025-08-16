@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@solana/web3.js": "^1.98.4",
+    "@netlify/functions": "^2.6.0",
     "buffer": "^6.0.3",
     "process": "^0.11.10",
     "qrcode": "^1.5.4"
