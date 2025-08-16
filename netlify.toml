@@ -1,15 +1,7 @@
-[build]
-  command = "npm run build"
-  publish = "dist"
-
-[build.environment]
-  NODE_VERSION = "20"
-
-# Vite SPA fallback
-[[redirects]]
-  from = "/*"
-  to = "/index.html"
-  status = 200
 [functions]
   node_bundler = "esbuild"
   external_node_modules = ["@solana/web3.js"]
+
+[build]
+  # Ensure Node 18+ in the build image
+  environment = { NODE_VERSION = "18" }
