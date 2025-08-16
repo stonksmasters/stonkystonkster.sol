@@ -52,6 +52,70 @@ export function setMemeWatermark(wm?: string) {
   _redrawLocalCanvas?.();
 }
 
+// ------- Netlify function fallback loader (serverless READ) -------
+
+/** Fetch published memes from Netlify (proxying on-chain registry). */
+async function fetchPublishedMemesFromEdge(limit = 60): Promise<any[]> {
+  // Accept either { memes: [...] } or raw array for flexibility
+  const url = `/.netlify/functions/fetch-memes?limit=${encodeURIComponent(String(limit))}`;
+  try {
+    const res = await fetch(url, { credentials: "omit", cache: "no-store" });
+    if (!res.ok) throw new Error(`fetch-memes ${res.status}`);
+    const data = await res.json();
+    const arr = Array.isArray(data?.memes) ? data.memes : (Array.isArray(data) ? data : []);
+    return arr;
+  } catch (err) {
+    console.warn("[Meme] fetchPublishedMemesFromEdge failed:", err);
+    return [];
+  }
+}
+
+/**
+ * Hydrate Discover grid from the edge function if:
+ *  - We haven't already hydrated, AND
+ *  - The grid is empty (avoid duplicates if discover.ts already fetched from chain)
+ */
+async function hydrateDiscoverFromEdgeOnce() {
+  if ((window as any).__DISCOVER_HYDRATED_FROM_EDGE) return;
+
+  const grid = document.getElementById("discover-grid");
+  if (grid && grid.children.length > 0) {
+    (window as any).__DISCOVER_HYDRATED_FROM_EDGE = true;
+    return; // discover.ts already populated from chain; skip fallback hydration
+  }
+
+  const list = await fetchPublishedMemesFromEdge();
+  if (!Array.isArray(list) || !list.length) {
+    (window as any).__DISCOVER_HYDRATED_FROM_EDGE = true;
+    return;
+  }
+
+  // Normalize records to Discover's optimistic event shape
+  for (const rec of list) {
+    // Some functions may return { p: PublishPayload, sig, ... }
+    // Others may return flat { k, l, wm, c/creator, sig }
+    const payload = rec?.p && typeof rec.p === "object" && rec.p.t === "api"
+      ? rec.p
+      : {
+          v: 1,
+          t: "api",
+          k: rec.k || rec.key,
+          l: rec.l || rec.lines || [],
+          wm: rec.wm,
+          c: rec.c || rec.creator || "",
+        };
+
+    if (!payload?.k || !Array.isArray(payload?.l)) continue;
+
+    const sig = String(rec?.sig || "");
+    window.dispatchEvent(new CustomEvent("stonky:published", {
+      detail: { sig, payload }
+    }));
+  }
+
+  (window as any).__DISCOVER_HYDRATED_FROM_EDGE = true;
+}
+
 // ------- Memegen helpers -------
 const memegen = {
   encode(s: string) {
@@ -381,6 +445,9 @@ async function initApiTemplateMode() {
   const search = pick<HTMLInputElement>("meme-search", "template-search");
   const prevBtn = pick<HTMLButtonElement>("meme-prev-page", "api-prev");
   const nextBtn = pick<HTMLButtonElement>("meme-next-page", "api-next");
+  // unified pager label (e.g., "1 / 10") — matches index.html
+  const pageLabel = pick<HTMLElement>("meme-page-label");
+  // (old split labels kept for back-compat if present)
   const pageSpan = pick<HTMLElement>("api-page");
   const pagesSpan = pick<HTMLElement>("api-pages");
   const wmHint = pick<HTMLElement>("api-watermark-hint");
@@ -534,6 +601,9 @@ async function initApiTemplateMode() {
       })
     );
 
+    // Update pager UI (single label or split spans)
+    const label = `${page} / ${totalPages}`;
+    if (pageLabel) pageLabel.textContent = label;
     if (pageSpan) pageSpan.textContent = String(page);
     if (pagesSpan) pagesSpan.textContent = String(totalPages);
     if (prevBtn) prevBtn.disabled = page <= 1;
@@ -640,6 +710,9 @@ async function initApiTemplateMode() {
       }
     } catch {}
   });
+
+  // 🔁 Fallback hydration from Netlify edge after UI is ready
+  hydrateDiscoverFromEdgeOnce();
 }
 
 // ------- Mode Toggle Wiring (API vs Local) -------

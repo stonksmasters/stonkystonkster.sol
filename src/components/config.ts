@@ -1,12 +1,8 @@
 // src/components/config.ts
 //
 // Central app config with sensible defaults.
-// You can override these via .env (VITE_*), or at runtime via window.__ENV__.
-//
-// New in this version:
-// - OWNER_WALLET: alias of TIP_DEST_SOL for modules that expect a generic owner pubkey
-// - PUBLISH_REGISTRY: on-chain registry address (pubkey) for Discover feed;
-//   falls back to OWNER_WALLET if not provided.
+// Override via .env (VITE_*) or runtime via window.__ENV__.
+// This unifies TipJar, Meme Shrine, and Discover feed.
 
 const env = (k: string, d = "") =>
   (import.meta as any).env?.[k] ?? (window as any).__ENV__?.[k] ?? d;
@@ -20,47 +16,62 @@ const parseList = (s: string) =>
 export type Cluster = "devnet" | "mainnet";
 
 export const CONFIG = {
-  // cluster: "devnet" or "mainnet"
+  // -------- Network ----------
   DEFAULT_CLUSTER: (env("VITE_DEFAULT_CLUSTER", "mainnet") as Cluster),
 
-  // Destination wallet for tips (REQUIRED – base58)
-  // If you also set VITE_OWNER_SOL_DOMAIN, we’ll try to resolve it and replace in the UI where applicable.
-  TIP_DEST_SOL: env("VITE_OWNER_WALLET", "HeGffZqFhB9euhind4aJFWy8waLCppTkie4gvW8bQhzp"),
+  // -------- Owner / Tips ----------
+  // Primary destination wallet for tips & fees (REQUIRED – base58)
+  TIP_DEST_SOL: env(
+    "VITE_OWNER_WALLET",
+    "HeGffZqFhB9euhind4aJFWy8waLCppTkie4gvW8bQhzp"
+  ),
+  OWNER_WALLET: env(
+    "VITE_OWNER_WALLET",
+    "HeGffZqFhB9euhind4aJFWy8waLCppTkie4gvW8bQhzp"
+  ),
+  OWNER_SOL_DOMAIN: env("VITE_OWNER_SOL_DOMAIN", "stonkystonkster.sol"),
 
-  // Back-compat/alias so other modules can refer to a single "owner" pubkey
-  OWNER_WALLET: env("VITE_OWNER_WALLET", "HeGffZqFhB9euhind4aJFWy8waLCppTkie4gvW8bQhzp"),
-
-  // Optional .sol name to show in the UI; main.ts attempts reverse lookups for connected users.
-  OWNER_SOL_DOMAIN: env("VITE_OWNER_SOL_DOMAIN", ""),
-
-  // **Discover**: public registry address (base58) to which creators publish a 0 SOL + Memo tx.
-  // If unset, we read from OWNER_WALLET so you get a working default.
+  // -------- Discover registry ----------
+  // Single public registry address (base58) that receives a memo for each publish/like.
+  // If unset, falls back to OWNER_WALLET.
   PUBLISH_REGISTRY: env("VITE_PUBLISH_REGISTRY", ""),
 
-  // Public RPC pools (free). You can override with comma-separated lists.
+  // Manifest + sharding knobs (registry-of-registries)
+  MANIFEST_TAG: env("VITE_MANIFEST_TAG", "registry.v1"),
+  WRITE_SHARDING: env("VITE_WRITE_SHARDING", "1") === "1",
+  MAX_REGISTRIES: Number(env("VITE_MAX_REGISTRIES", "4")) || 4,
+
+  // -------- RPC pools ----------
   DEVNET_RPCS: (() => {
     const v = env("VITE_RPC_DEVNET", "");
+    return v ? parseList(v) : ["https://api.devnet.solana.com"];
+  })(),
+  MAINNET_RPCS: (() => {
+    const v = env("VITE_RPC_MAINNET", "");
     return v
       ? parseList(v)
       : [
-          "https://rpc.ankr.com/solana_devnet",
-          "https://api.devnet.solana.com",
+          // Replace api-key in .env.production for deployment
+          "https://mainnet.helius-rpc.com/?api-key=41701dab-24cf-4c52-8583-b60a3a8ddaac",
+          "https://api.mainnet-beta.solana.com",
         ];
   })(),
 
-MAINNET_RPCS: (() => {
-  const v = env("VITE_RPC_MAINNET", "");
-  return v ? parseList(v) : [
-    "https://mainnet.helius-rpc.com/?api-key=41701dab-24cf-4c52-8583-b60a3a8ddaac"
-  ];
-})(),
-
-
-  // Meme API key if you add one (optional)
+  // -------- Meme API ----------
   MEMEGEN_API_KEY: env("VITE_MEMEGEN_API_KEY", ""),
+
+  // -------- Likes / Superlikes economics (lamports) ----------
+  LIKE_LAMPORTS: Number(env("VITE_LIKE_LAMPORTS", "5000")) || 5000,
+  SUPERLIKE_LAMPORTS:
+    Number(env("VITE_SUPERLIKE_LAMPORTS", "")) || 5000 * 10,
+  LIKE_FEE_BPS: Number(env("VITE_LIKE_FEE_BPS", "1000")) || 1000, // 10% = 1000 bps
+
+  // -------- Debug / rate limiting ----------
+  DEBUG: env("VITE_DEBUG", "0") === "1",
+  MIN_CALL_SPACING: Number(env("VITE_MIN_CALL_SPACING", "250")) || 250,
 };
 
-// Provide a sensible runtime fallback for PUBLISH_REGISTRY if not set
+// Runtime fallback: always ensure a registry exists
 if (!CONFIG.PUBLISH_REGISTRY) {
   (CONFIG as any).PUBLISH_REGISTRY = CONFIG.OWNER_WALLET;
 }
