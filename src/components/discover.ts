@@ -234,7 +234,6 @@ async function fetchPageFromApi(before?: string, limit = PAGE_SIZE): Promise<Fee
   if (!res.ok) throw new Error(`fetchMemes failed: ${res.status}`);
   const body = await res.json();
 
-  // Accept either array or {items:[...]}
   const items: ApiFeedItem[] = Array.isArray(body) ? body : Array.isArray(body?.items) ? body.items : [];
   return items
     .filter((x) => x && x.sig && x.p && Array.isArray(x.p.l) && typeof x.p.k === "string")
@@ -252,7 +251,7 @@ async function loadRecentLikesMapFromApi(): Promise<LikesMap> {
   const res = await fetch(url.toString(), { method: "GET", credentials: "omit" });
   if (!res.ok) throw new Error(`fetchLikes failed: ${res.status}`);
   const j = await res.json();
-  return (j && typeof j === "object") ? j as LikesMap : {};
+  return (j && typeof j === "object") ? (j as LikesMap) : {};
 }
 
 // ---------- Transaction fetching (kept for rare manifest scan fallback) ----------
@@ -557,8 +556,7 @@ export async function publishLike(opts: { id: string; creator: string; lamports:
 }
 
 // ---------- Likes map (READ via serverless) ----------
-async function loadRecentLikesMap(totalLimitSigs = 200): Promise<LikesMap> {
-  // totalLimitSigs kept for signature compatibility; server ignores/handles internally
+async function loadRecentLikesMap(_totalLimitSigs = 200): Promise<LikesMap> {
   return await loadRecentLikesMapFromApi();
 }
 
@@ -685,10 +683,9 @@ export function initDiscoverFeed() {
   };
 
   let loading = false;
-  let cursor: string | undefined; // we page by 'before' signature if your function supports it
+  let cursor: string | undefined; // page by 'before' signature if your function supports it
 
   async function renderCountsFor(ids: string[]) {
-    // Lazy-load once per page batch
     if (Object.keys(likesMap).length === 0) {
       try {
         const m = await loadRecentLikesMap(250);
