@@ -1,7 +1,7 @@
 [functions]
   node_bundler = "esbuild"
   external_node_modules = ["@solana/web3.js"]
-
+directory = "netlify/functions"
 [build]
   # Ensure Node 18+ in the build image
   environment = { NODE_VERSION = "18" }
