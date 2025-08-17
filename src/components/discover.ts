@@ -1,7 +1,6 @@
 // src/components/discover.ts
-// Serverless "Discover" feed via on-chain Memo.
-// Adds: Like + Superlike with 10% creator-fee split to site owner.
-// Safe for Helius free tier (no JSON-RPC batch). Serial getTransaction + backoff.
+// Discover feed via static JSON (Web2, free) + light on-chain deltas for likes.
+// Writes stay on-chain (Memo + tiny transfers). Compatible with Helius free tier.
 
 import { CONFIG } from "./config";
 import {
@@ -24,13 +23,11 @@ const warn = (...a: any[]) => { if (DEBUG) console.warn("[Discover]", ...a); };
 // ---------- Constants ----------
 const MEMO_PROGRAM_ID = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
 const OWNER_PK = new PublicKey((CONFIG as any).TIP_DEST_SOL || (CONFIG as any).OWNER_WALLET);
-const REGISTRY_PK = OWNER_PK; // we still "ping" this so likes show in the same feed
+const REGISTRY_PK = OWNER_PK; // one address to index for posts/likes
 const enc = new TextEncoder();
 
 // UI + paging
 const PAGE_SIZE = 12;
-const TX_CHUNK = 8;              // how many signatures to resolve serially before yielding
-const MIN_CALL_SPACING = 250;    // ms soft-rate-limit between RPC calls
 
 // Like economics (configurable via .env, with safe defaults)
 const LIKE_LAMPORTS =
@@ -43,20 +40,19 @@ const LIKE_FEE_BPS =
 // ---------- Small utils ----------
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const jitter = (ms: number) => ms + Math.floor(Math.random() * 150);
-function withTimeout<T>(p: Promise<T>, ms = 3500): Promise<T> {
-  return Promise.race([p, new Promise<T>((_, rej) => setTimeout(() => rej(new Error("timeout")), ms))]);
-}
-function is429(e: unknown): boolean {
-  const s = String((e as any)?.message || e || "");
-  return s.includes("429") || s.includes("Too many requests") || s.includes("-32429");
-}
 function solStr(lamports: number) {
   const s = lamports / LAMPORTS_PER_SOL;
-  // show up to 9 decimals, but trim trailing zeros
   return s.toFixed(9).replace(/\.?0+$/, "");
 }
+function ipfsToHttp(u: string) {
+  if (!u) return u;
+  if (u.startsWith("ipfs://")) return `https://w3s.link/ipfs/${u.slice("ipfs://".length)}`;
+  return u;
+}
+function encodeMemo(obj: any) { return JSON.stringify(obj); }
+function tryParseJSON(s: string) { try { return JSON.parse(s); } catch { return null; } }
 
-// ---------- Endpoint pool (ONLY configured RPCs) ----------
+// ---------- Endpoint pool (for confirm + likes delta only) ----------
 function corsFriendly(u: string) {
   const l = u.toLowerCase();
   if (l.includes("publicnode.com")) return false;
@@ -94,14 +90,14 @@ async function pickConn(): Promise<Connection> {
     try {
       const c = new Connection(ep.url, { commitment: "confirmed" });
       dbg("Probing RPC:", ep.url);
-      await withTimeout(c.getLatestBlockhash("finalized"), 3500);
+      await c.getLatestBlockhash("finalized");
       CACHED_CONN = c;
       CACHED_URL = ep.url;
       info("Using RPC:", ep.url);
       return c;
     } catch (err) {
       if (looksLikeHelius401(err, ep.url)) {
-        toast.error?.("Helius says Unauthorized: add your site to Allowed Origins for this API key.");
+        toast.error?.("Helius Unauthorized: add this site origin to the key's allowlist.");
       }
       ep.failScore += 1;
       ep.cooldownUntil = now + Math.min(30_000, 3_000 * ep.failScore);
@@ -111,50 +107,62 @@ async function pickConn(): Promise<Connection> {
   throw new Error("No CORS-friendly RPC available");
 }
 
-function backoff(ep?: Ep, attempt = 0) {
-  const base = [500, 1000, 2000, 4000, 6000][Math.min(attempt, 4)];
-  const wait = jitter(base);
-  if (ep) {
-    ep.failScore += 1;
-    ep.cooldownUntil = Date.now() + Math.min(60_000, base * 3);
-  }
-  return wait;
+// ---------- Payloads ----------
+type PostPayload = {
+  v: 1; t: "post";
+  // minimal web2/web3 pointer fields:
+  cid?: string;                 // optional IPFS CID
+  url: string;                  // http(s) or ipfs://
+  author: string;               // base58
+  cap?: string;                 // optional caption
+  // carry-through memegen extras so your editor can reconstruct:
+  k?: string; l?: string[]; wm?: string;
+};
+
+type LikePayload = {
+  v: 1; t: "like";
+  id?: string;                  // legacy id (used by older clients)
+  cid?: string;                 // preferred: pointer to the post content
+  to: string;                   // author base58
+  c: string;                    // liker base58
+  amt: number;                  // lamports paid by liker
+  x?: 1;                        // superlike marker
+};
+
+// ---------- Feed (static JSON) ----------
+type FeedIndex = {
+  updated: number;
+  latestPage: number;
+  pageSize: number;
+  pages: { n: number; path: string; fromSig?: string; toSig?: string }[];
+};
+
+type FeedItemPost = PostPayload & { sig: string; slot: number; ts: number; likes?: number; tipLamports?: number };
+type FeedItemLike = LikePayload & { sig: string; slot: number; ts: number };
+type FeedPage = { n: number; items: Array<({ type: "post" } & FeedItemPost) | ({ type: "like" } & FeedItemLike)> };
+
+async function fetchJSON<T>(path: string): Promise<T> {
+  const res = await fetch(path, { cache: "no-cache" });
+  if (!res.ok) throw new Error(`Fetch ${path} failed: ${res.status}`);
+  return res.json();
 }
 
-// Soft client-side rate limiter
-let lastCall = 0;
-async function rateLimitPause() {
-  const delta = Date.now() - lastCall;
-  if (delta < MIN_CALL_SPACING) await sleep(MIN_CALL_SPACING - delta);
-  lastCall = Date.now();
-}
+async function loadStaticPage(): Promise<FeedItemPost[]> {
+  // 1) fetch index
+  const idx = await fetchJSON<FeedIndex>("/feed/index.json");
+  const latestPath =
+    idx.pages.find(p => p.n === idx.latestPage)?.path ||
+    `/feed/pages/page-${String(idx.latestPage).padStart(4, "0")}.json`;
 
-// ---------- Payload helpers ----------
-type PublishPayload = { v: 1; t: "api"; k: string; l: string[]; wm?: string; c: string };
-type LikePayload    = { v: 1; t: "like"; id: string; c: string; amt: number; x?: 1 };
-type FeedItem = { sig: string; slot: number; time: number; p: PublishPayload };
+  // 2) fetch latest page
+  const page = await fetchJSON<FeedPage>(latestPath);
 
-function encodeMemo(obj: any) {
-  return JSON.stringify(obj);
-}
-function tryParseMemo(s: string): any | null {
-  try { return JSON.parse(s); } catch { return null; }
-}
-function memegenPreviewUrl(key: string, lines: string[]) {
-  const u = new URL("https://api.memegen.link/images/preview.jpg");
-  u.searchParams.set("template", key);
-  (lines || []).forEach((t) => u.searchParams.append("text[]", t && t.trim() ? t : "_"));
-  u.searchParams.set("font", "impact");
-  u.searchParams.set("width", "600");
-  u.searchParams.set("cb", String(Date.now() % 1e9));
-  return u.toString();
-}
-
-// Deterministic meme id (so likes attach reliably)
-function memeId(key: string, lines: string[]) {
-  // Keep it readable + short; encode slashes to avoid collisions
-  const safe = (lines || []).map((s) => (s || "").replace(/\//g, "~s").trim());
-  return `${key}|${safe.join("|")}`.slice(0, 120);
+  // 3) take posts only, newest first
+  const posts = (page.items || [])
+    .filter((it: any) => it.type === "post")
+    .map((it: any) => it as FeedItemPost)
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  return posts;
 }
 
 // ---------- Progress events ----------
@@ -164,13 +172,41 @@ function emitProgress(phase: string, data?: Record<string, any>) {
   dbg("progress:", detail);
 }
 
-// ---------- Publish meme (unchanged behavior) ----------
-export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: string }) {
+// ---------- Memegen helper (for legacy posts or local preview) ----------
+function memegenPreviewUrl(key?: string, lines?: string[]) {
+  if (!key) return "";
+  const u = new URL("https://api.memegen.link/images/preview.jpg");
+  u.searchParams.set("template", key);
+  (lines || []).forEach((t) => u.searchParams.append("text[]", t && t.trim() ? t : "_"));
+  u.searchParams.set("font", "impact");
+  u.searchParams.set("width", "600");
+  u.searchParams.set("cb", String(Date.now() % 1e9));
+  return u.toString();
+}
+
+// Deterministic id for legacy likes (when no CID)
+function memeId(key?: string, lines?: string[]) {
+  if (!key) return "";
+  const safe = (lines || []).map((s) => (s || "").replace(/\//g, "~s").trim());
+  return `${key}|${safe.join("|")}`.slice(0, 120);
+}
+
+// ---------- Publish meme (now emits t:"post" for the Web2 feed bot) ----------
+export async function publishMemeApi(opts: { key?: string; lines?: string[]; wm?: string; url?: string; cid?: string; cap?: string }) {
   const provider = (window as any).solana;
   if (!provider?.publicKey) throw new Error("Connect wallet first");
 
-  const creator = provider.publicKey.toBase58();
-  const payload: PublishPayload = { v: 1, t: "api", k: opts.key, l: opts.lines, wm: opts.wm, c: creator };
+  // Prefer explicit URL/CID if provided (e.g., IPFS); otherwise use memegen preview URL.
+  const url = opts.url || memegenPreviewUrl(opts.key, opts.lines);
+  if (!url) throw new Error("Missing meme URL");
+
+  const payload: PostPayload = {
+    v: 1, t: "post",
+    url, cid: opts.cid, author: provider.publicKey.toBase58(),
+    cap: opts.cap,
+    // carry extras so editor can reconstruct:
+    k: opts.key, l: opts.lines, wm: opts.wm,
+  };
   emitProgress("build:start", { payload });
 
   let conn: Connection;
@@ -183,26 +219,18 @@ export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: 
     throw e;
   }
 
-  let recent: string;
-  try {
-    const bh = await conn.getLatestBlockhash("finalized");
-    recent = bh.blockhash;
-    emitProgress("build:blockhash_ok", { blockhash: recent });
-  } catch (e) {
-    console.error("[Discover] getLatestBlockhash failed:", e);
-    toast.error?.("RPC busy. Try again.");
-    throw e;
-  }
+  const recent = (await conn.getLatestBlockhash("finalized")).blockhash;
 
   const memoIx = new TransactionInstruction({
     programId: MEMO_PROGRAM_ID,
     keys: [],
     data: Buffer.from(enc.encode(encodeMemo(payload))),
   });
+  // 1 lamport "ping" so the tx indexes under REGISTRY
   const pingIx = SystemProgram.transfer({
     fromPubkey: provider.publicKey,
     toPubkey: REGISTRY_PK,
-    lamports: 0,
+    lamports: 1, // 0 is invalid; costs effectively nothing
   });
 
   const tx = new Transaction().add(pingIx, memoIx);
@@ -254,8 +282,8 @@ export async function publishMemeApi(opts: { key: string; lines: string[]; wm?: 
   return sig;
 }
 
-// ---------- Like / Superlike ----------
-export async function publishLike(opts: { id: string; creator: string; lamports: number; superlike?: boolean }) {
+// ---------- Like / Superlike (adds both id & cid so indexer can tally by CID) ----------
+export async function publishLike(opts: { id?: string; cid?: string; creator: string; lamports: number; superlike?: boolean }) {
   const provider = (window as any).solana;
   if (!provider?.publicKey) throw new Error("Connect wallet first");
 
@@ -267,7 +295,9 @@ export async function publishLike(opts: { id: string; creator: string; lamports:
   const likePayload: LikePayload = {
     v: 1,
     t: "like",
-    id: opts.id,
+    id: opts.id,           // legacy
+    cid: opts.cid,         // preferred when present
+    to: opts.creator,
     c: payer.toBase58(),
     amt: total,
     x: opts.superlike ? 1 : undefined,
@@ -285,7 +315,7 @@ export async function publishLike(opts: { id: string; creator: string; lamports:
     data: Buffer.from(enc.encode(encodeMemo(likePayload))),
   });
 
-  const ixPing = SystemProgram.transfer({ fromPubkey: payer, toPubkey: REGISTRY_PK, lamports: 0 });
+  const ixPing = SystemProgram.transfer({ fromPubkey: payer, toPubkey: REGISTRY_PK, lamports: 1 });
   const ixFee  = SystemProgram.transfer({ fromPubkey: payer, toPubkey: OWNER_PK,    lamports: fee });
   const ixTip  = toCreator > 0
     ? SystemProgram.transfer({ fromPubkey: payer, toPubkey: new PublicKey(opts.creator), lamports: toCreator })
@@ -319,11 +349,11 @@ export async function publishLike(opts: { id: string; creator: string; lamports:
   try { await confirmSignatureSmart(sig); } catch {}
   toast.success?.(opts.superlike ? "Superliked!" : "Liked!");
   // Inform UI to bump counts
-  window.dispatchEvent(new CustomEvent("stonky:liked", { detail: { id: opts.id, lamports: total, sig } }));
+  window.dispatchEvent(new CustomEvent("stonky:liked", { detail: { id: opts.id, cid: opts.cid, lamports: total, sig } }));
   return sig;
 }
 
-// ---------- Confirm (rotate on hot endpoints) ----------
+// ---------- Confirm helper ----------
 async function confirmSignatureSmart(sig: string) {
   const tried = new Set<string>();
   let attempts = 0;
@@ -334,113 +364,46 @@ async function confirmSignatureSmart(sig: string) {
     tried.add(ep);
     dbg("confirm on", ep, "attempt", attempts);
     try {
-      const st = await withTimeout(conn.getSignatureStatuses([sig]), 3500);
+      const st = await conn.getSignatureStatuses([sig]);
       const s = st?.value?.[0];
       if (s?.confirmationStatus === "confirmed" || s?.confirmationStatus === "finalized") return;
       await sleep(jitter(800));
-    } catch (e) {
-      if (is429(e)) {
-        const pp = pool.find((p) => p.url === ep);
-        await sleep(backoff(pp, attempts));
-      } else {
-        await sleep(jitter(600));
-      }
+    } catch {
+      await sleep(jitter(600));
     }
   }
 }
 
-// ---------- Fetching (no batch) ----------
-async function fetchTransactionsSerial(conn: Connection, sigs: string[]) {
-  const out: (import("@solana/web3.js").VersionedTransactionResponse | null)[] = [];
-  for (let i = 0; i < sigs.length; i++) {
-    const sig = sigs[i];
-    let tries = 0;
-    for (;;) {
-      try {
-        await rateLimitPause();
-        const tx = await withTimeout(
-          conn.getTransaction(sig, { maxSupportedTransactionVersion: 0 }),
-          6500
-        );
-        out.push(tx);
-        break;
-      } catch (e) {
-        if (is429(e)) {
-          const ep = pool.find((p) => p.url === (conn as any)._rpcEndpoint);
-          await sleep(backoff(ep, tries++));
-          if (tries > 3) { out.push(null); break; }
-        } else {
-          await sleep(jitter(400));
-          out.push(null);
-          break;
-        }
+// ---------- Likes map (soft, recent only to stay rate-limit friendly) ----------
+type LikesMap = Record<string, number>;
+async function loadRecentLikesMap(limitSigs = 200): Promise<LikesMap> {
+  // Pull just a single page of signatures and count likes by cid or id (fallback)
+  const conn = await pickConn();
+  const sigs = await conn.getSignaturesForAddress(REGISTRY_PK, { limit: limitSigs });
+  const list = sigs.map((s) => s.signature);
+
+  const out: LikesMap = {};
+  for (const sig of list) {
+    try {
+      const tx = await conn.getTransaction(sig, { maxSupportedTransactionVersion: 0 });
+      const metaMemo = (tx as any)?.meta?.memo;
+      let memoStr = typeof metaMemo === "string" && metaMemo ? metaMemo : "";
+      if (!memoStr) {
+        const logs: string[] = (tx as any)?.meta?.logMessages || [];
+        const lastLog = logs.filter((m: string) => m?.startsWith("Program log: ")).pop();
+        if (lastLog) memoStr = lastLog.slice("Program log: ".length);
       }
-    }
-    // yield occasionally
-    if ((i + 1) % TX_CHUNK === 0) await sleep(0);
+      const j = tryParseJSON(memoStr);
+      if (j && j.t === "like") {
+        const key = j.cid || j.id;
+        if (typeof key === "string" && key.length) out[key] = (out[key] || 0) + 1;
+      }
+    } catch {}
   }
   return out;
 }
 
-// Parse memo from tx meta
-function extractMemoFromTx(tx: any): string {
-  if (!tx) return "";
-  const logs: string[] = (tx.meta as any)?.logMessages || [];
-  const lastLog = logs.filter((m) => m?.startsWith("Program log: ")).pop();
-  if (lastLog) return lastLog.slice("Program log: ".length);
-  if ((tx.meta as any)?.memo) return String((tx.meta as any).memo);
-  return "";
-}
-
-// ---------- Likes map (soft) ----------
-type LikesMap = Record<string, number>;
-async function loadRecentLikesMap(limitSigs = 200): Promise<LikesMap> {
-  const conn = await pickConn();
-  await rateLimitPause();
-  const sigs = await conn.getSignaturesForAddress(REGISTRY_PK, { limit: limitSigs });
-  const list = sigs.map((s) => s.signature);
-  const txs = await fetchTransactionsSerial(conn, list);
-  const counts: LikesMap = {};
-  for (let i = 0; i < txs.length; i++) {
-    const memoStr = extractMemoFromTx(txs[i]);
-    const m = tryParseMemo(memoStr);
-    if (m?.t === "like" && typeof m.id === "string") {
-      counts[m.id] = (counts[m.id] || 0) + 1;
-    }
-  }
-  return counts;
-}
-
-// ---------- Discover feed ----------
-async function fetchPage(before?: string, limit = PAGE_SIZE): Promise<FeedItem[]> {
-  const conn = await pickConn();
-  await rateLimitPause();
-
-  const sigs = await conn.getSignaturesForAddress(
-    REGISTRY_PK,
-    before ? { before, limit } : { limit },
-  );
-  dbg("page sigs:", sigs.length);
-  if (!sigs.length) return [];
-
-  const list = sigs.map((s) => s.signature);
-  const txs = await fetchTransactionsSerial(conn, list);
-
-  const out: FeedItem[] = [];
-  for (let j = 0; j < txs.length; j++) {
-    const tx = txs[j];
-    const sig = list[j];
-    if (!tx) continue;
-    const memoStr = extractMemoFromTx(tx);
-    const m = tryParseMemo(memoStr);
-    if (m?.t === "api" && typeof m.k === "string" && Array.isArray(m.l)) {
-      out.push({ sig, slot: tx.slot, time: (tx.blockTime || 0) * 1000, p: m as PublishPayload });
-    }
-  }
-
-  return out.sort((a, b) => b.slot - a.slot);
-}
-
+// ---------- DOM + rendering ----------
 function ensureDiscoverSection(): HTMLElement {
   let sec = document.getElementById("discover");
   if (sec) return sec;
@@ -450,7 +413,7 @@ function ensureDiscoverSection(): HTMLElement {
   sec.className = "glass card rounded-xl p-6 mt-4";
   sec.innerHTML = `
     <h3 class="text-lg font-semibold mb-3">🌎 Discover</h3>
-    <div class="text-xs text-white/60 mb-2">Recent community memes (on-chain)</div>
+    <div class="text-xs text-white/60 mb-2">Recent community memes (cached)</div>
     <div id="discover-grid" class="grid grid-cols-2 md:grid-cols-3 gap-3"></div>
     <div class="flex justify-center mt-3">
       <button id="discover-more" class="px-3 py-1.5 rounded-md border border-white/15 bg-white/10 text-sm hover:bg-white/15">Load more</button>
@@ -460,6 +423,7 @@ function ensureDiscoverSection(): HTMLElement {
   return sec;
 }
 
+// ---------- Main init ----------
 export function initDiscoverFeed() {
   ensureDiscoverSection();
   const grid = document.getElementById("discover-grid")!;
@@ -467,112 +431,129 @@ export function initDiscoverFeed() {
 
   // cache likes we’ve seen so far
   const likesMap: LikesMap = {};
-  const bumpLike = (id: string) => {
-    likesMap[id] = (likesMap[id] || 0) + 1;
-    const el = grid.querySelector<HTMLElement>(`[data-like-count="${cssEscape(id)}"]`);
-    if (el) el.textContent = String(likesMap[id]);
+  const bumpLike = (key: string) => {
+    likesMap[key] = (likesMap[key] || 0) + 1;
+    const el = grid.querySelector<HTMLElement>(`[data-like-count="${cssEscape(key)}"]`);
+    if (el) el.textContent = String(likesMap[key]);
   };
 
-  let lastSig: string | undefined;
-  let loading = false;
+  let pageOffset = 0; // we slice the latest static page in chunks of PAGE_SIZE
 
-  async function renderCountsFor(ids: string[]) {
-    // If we haven't loaded any likes yet, bootstrap from recent history once
-    if (Object.keys(likesMap).length === 0) {
-      try {
-        const m = await loadRecentLikesMap(250);
-        Object.assign(likesMap, m);
-      } catch (e) {
-        warn("likes map load failed", e);
-      }
+  async function bootstrapLikes() {
+    if (Object.keys(likesMap).length) return;
+    try {
+      const m = await loadRecentLikesMap(200);
+      Object.assign(likesMap, m);
+    } catch (e) {
+      warn("likes map load failed", e);
     }
-    ids.forEach((id) => {
-      const el = grid.querySelector<HTMLElement>(`[data-like-count="${cssEscape(id)}"]`);
-      if (el) el.textContent = String(likesMap[id] || 0);
+  }
+
+  function renderCards(posts: FeedItemPost[]) {
+    const cards = posts.map((it) => {
+      const httpUrl = ipfsToHttp(it.url || "");
+      // Prefer CID as the stable key for likes; fallback to legacy id reconstruction.
+      const key = it.cid || memeId(it.k, it.l);
+      const when = it.ts ? new Date((it.ts || 0) * 1000).toLocaleString() : "";
+      const likeSol = solStr(LIKE_LAMPORTS);
+      const superSol = solStr(SUPERLIKE_LAMPORTS);
+
+      // if there is no url but memegen extras exist, reconstruct a preview
+      const imgSrc = httpUrl || memegenPreviewUrl(it.k, it.l);
+
+      return `
+        <div class="relative rounded-lg overflow-hidden border border-white/10 bg-white/5">
+          <img src="${imgSrc}" alt="${escapeAttr(it.k || it.cap || "meme")}" class="w-full aspect-square object-cover" />
+          ${it.wm ? `<div class="absolute right-2 bottom-2 px-2 py-1 rounded bg-black/50 text-[11px]">${escapeAttr(it.wm)}</div>` : ""}
+
+          <div class="p-2 text-[11px] text-white/70 flex items-center justify-between">
+            <span>${escapeHtmlShort(it.k || it.cap || "")}</span><span>${when}</span>
+          </div>
+
+          <div class="px-2 pb-2 flex gap-1 items-center">
+            <button class="like-btn px-2 py-1 rounded bg-white/10 border border-white/10 text-xs"
+              data-key="${escapeAttr(key)}" data-cid="${escapeAttr(it.cid || "")}" data-creator="${escapeAttr(it.author)}" data-amt="${LIKE_LAMPORTS}">
+              ❤️ Like (${likeSol} SOL)
+            </button>
+            <button class="sulike-btn px-2 py-1 rounded bg-white/10 border border-white/10 text-xs"
+              data-key="${escapeAttr(key)}" data-cid="${escapeAttr(it.cid || "")}" data-creator="${escapeAttr(it.author)}" data-amt="${SUPERLIKE_LAMPORTS}">
+              💥 Superlike (${superSol} SOL)
+            </button>
+            <span class="ml-auto text-xs opacity-80">Likes: <b data-like-count="${escapeAttr(key)}">${it.likes ?? 0}</b></span>
+            ${it.k ? `<button class="px-2 py-1 rounded bg-white/10 border border-white/10 text-xs open-btn"
+              data-open="${encodeURIComponent(it.k || "")}"
+              data-lines='${encodeURIComponent(JSON.stringify(it.l || []))}'>Open</button>` : ""}
+          </div>
+        </div>`;
+    }).join("");
+    grid.insertAdjacentHTML("beforeend", cards);
+
+    // Wire open back into editor
+    grid.querySelectorAll<HTMLButtonElement>("button.open-btn").forEach((b) => {
+      b.addEventListener("click", () => {
+        const tpl = decodeURIComponent(b.dataset.open || "");
+        const lines = JSON.parse(decodeURIComponent(b.dataset.lines || "[]"));
+        window.dispatchEvent(new CustomEvent("stonky:openMeme", { detail: { tpl, lines } }));
+        toast.success?.("Loaded into editor");
+      });
+    });
+
+    // Wire like/superlike
+    grid.querySelectorAll<HTMLButtonElement>("button.like-btn,button.sulike-btn").forEach((b) => {
+      b.addEventListener("click", async () => {
+        const key = String(b.dataset.key || "");
+        const cid = String(b.dataset.cid || "") || undefined;
+        const creator = String(b.dataset.creator || "");
+        const lamports = Number(b.dataset.amt || "0") | 0;
+        const superlike = b.classList.contains("sulike-btn");
+        try {
+          b.disabled = true;
+          await publishLike({ id: key, cid, creator, lamports, superlike });
+          bumpLike(cid || key);
+        } catch {
+          // messages already shown
+        } finally {
+          b.disabled = false;
+        }
+      });
     });
   }
 
   async function loadMore() {
-    if (loading) return;
-    loading = true; more.disabled = true;
+    more.disabled = true;
 
     try {
-      const page = await fetchPage(lastSig, PAGE_SIZE);
-      if (!page.length) { more.textContent = "No more"; return; }
-      lastSig = page[page.length - 1].sig;
+      // 1) load latest static page
+      const allPosts = await loadStaticPage();
+      if (!allPosts.length) {
+        more.textContent = "No posts yet";
+        return;
+      }
 
-      const cards = page.map((it) => {
-        const id = memeId(it.p.k, it.p.l || []);
-        const src = memegenPreviewUrl(it.p.k, it.p.l);
-        const when = it.time ? new Date(it.time).toLocaleString() : "";
-        // transparent pricing
-        const likeSol = solStr(LIKE_LAMPORTS);
-        const superSol = solStr(SUPERLIKE_LAMPORTS);
-        return `
-          <div class="relative rounded-lg overflow-hidden border border-white/10 bg-white/5">
-            <img src="${src}" alt="${it.p.k}" class="w-full aspect-square object-cover" />
-            <div class="absolute right-2 bottom-2 px-2 py-1 rounded bg-black/50 text-[11px]">${it.p.wm || ""}</div>
+      // 2) slice a chunk
+      const slice = allPosts.slice(pageOffset, pageOffset + PAGE_SIZE);
+      pageOffset += slice.length;
+      renderCards(slice);
 
-            <div class="p-2 text-[11px] text-white/70 flex items-center justify-between">
-              <span>${it.p.k}</span><span>${when}</span>
-            </div>
+      // 3) populate likes
+      await bootstrapLikes();
+      for (const it of slice) {
+        const k = it.cid || memeId(it.k, it.l);
+        const el = grid.querySelector<HTMLElement>(`[data-like-count="${cssEscape(k)}"]`);
+        if (el && it.likes == null) el.textContent = String(likesMap[k] || 0);
+      }
 
-            <div class="px-2 pb-2 flex gap-1 items-center">
-              <button class="like-btn px-2 py-1 rounded bg-white/10 border border-white/10 text-xs"
-                data-id="${escapeAttr(id)}" data-creator="${escapeAttr(it.p.c)}" data-amt="${LIKE_LAMPORTS}">
-                ❤️ Like (${likeSol} SOL)
-              </button>
-              <button class="sulike-btn px-2 py-1 rounded bg-white/10 border border-white/10 text-xs"
-                data-id="${escapeAttr(id)}" data-creator="${escapeAttr(it.p.c)}" data-amt="${SUPERLIKE_LAMPORTS}">
-                💥 Superlike (${superSol} SOL)
-              </button>
-              <span class="ml-auto text-xs opacity-80">Likes: <b data-like-count="${escapeAttr(id)}">0</b></span>
-              <button class="px-2 py-1 rounded bg-white/10 border border-white/10 text-xs open-btn"
-                data-open="${encodeURIComponent(it.p.k)}"
-                data-lines='${encodeURIComponent(JSON.stringify(it.p.l || []))}'>Open</button>
-            </div>
-          </div>`;
-      }).join("");
-
-      grid.insertAdjacentHTML("beforeend", cards);
-
-      // Wire open
-      grid.querySelectorAll<HTMLButtonElement>("button.open-btn").forEach((b) => {
-        b.addEventListener("click", () => {
-          const tpl = decodeURIComponent(b.dataset.open || "");
-          const lines = JSON.parse(decodeURIComponent(b.dataset.lines || "[]"));
-          window.dispatchEvent(new CustomEvent("stonky:openMeme", { detail: { tpl, lines } }));
-          toast.success?.("Loaded into editor");
-        });
-      });
-
-      // Wire like/superlike
-      grid.querySelectorAll<HTMLButtonElement>("button.like-btn,button.sulike-btn").forEach((b) => {
-        b.addEventListener("click", async () => {
-          const id = String(b.dataset.id || "");
-          const creator = String(b.dataset.creator || "");
-          const lamports = Number(b.dataset.amt || "0") | 0;
-          const superlike = b.classList.contains("sulike-btn");
-          try {
-            b.disabled = true;
-            await publishLike({ id, creator, lamports, superlike });
-            bumpLike(id);
-          } catch {
-            // no-op; messages already shown
-          } finally {
-            b.disabled = false;
-          }
-        });
-      });
-
-      // Fill counts (soft, from recent history)
-      renderCountsFor(page.map((p) => memeId(p.p.k, p.p.l || [])));
+      // 4) no more?
+      if (pageOffset >= allPosts.length) {
+        more.textContent = "No more";
+        more.disabled = true;
+      } else {
+        more.disabled = false;
+      }
     } catch (err) {
-      console.error("[Discover] Failed to load page:", err);
-      toast.error?.("RPC busy / unauthorized. Check Helius origin allowlist.");
-      CACHED_CONN = null; CACHED_URL = null;
-    } finally {
-      loading = false; more.disabled = false;
+      console.error("[Discover] Failed to load static feed:", err);
+      toast.error?.("Feed unavailable.");
+      more.disabled = false;
     }
   }
 
@@ -582,23 +563,25 @@ export function initDiscoverFeed() {
 
   // Live bump when a like finishes
   window.addEventListener("stonky:liked", (e: any) => {
-    const id = e?.detail?.id;
-    if (typeof id === "string") bumpLike(id);
+    const key = e?.detail?.cid || e?.detail?.id;
+    if (typeof key === "string" && key) bumpLike(key);
   });
 
-  // Handle publish events (unchanged)
+  // Handle publish events (unchanged call site; now emits t:"post")
   window.addEventListener("stonky:publishMeme", async (e: any) => {
-    const { key, lines, wm } = e?.detail || {};
-    try { await publishMemeApi({ key, lines, wm }); }
+    const { key, lines, wm, url, cid, cap } = e?.detail || {};
+    try { await publishMemeApi({ key, lines, wm, url, cid, cap }); }
     catch (err) {
       if (String(err).includes("User rejected")) return;
       console.error("[Discover] Publish failed:", err);
       toast.error?.("Publish failed. Please try again.");
-      CACHED_CONN = null; CACHED_URL = null;
     }
   });
 }
 
 // ---------- helpers for safe HTML attrs / selectors ----------
-function escapeAttr(s: string) { return s.replace(/"/g, "&quot;"); }
-function cssEscape(s: string) { return CSS && (CSS as any).escape ? (CSS as any).escape(s) : s.replace(/"/g, '\\"'); }
+function escapeAttr(s: string) { return String(s || "").replace(/"/g, "&quot;"); }
+function escapeHtmlShort(s?: string) {
+  return String(s || "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c] as string));
+}
+function cssEscape(s: string) { return (window as any).CSS && (CSS as any).escape ? (CSS as any).escape(s) : String(s).replace(/"/g, '\\"'); }

@@ -1,0 +1,31 @@
+name: Build meme feed
+on:
+  schedule: [{ cron: "*/15 * * * *" }]
+  workflow_dispatch: {}
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+
+      # install ONLY what's needed for the script
+      - run: npm i @solana/web3.js bs58
+
+      - name: Build feed JSON
+        env:
+          HELIUS: ${{ secrets.HELIUS_KEY }}          # your Helius key
+          REGISTRY: ${{ secrets.REGISTRY_PUBKEY }}   # pubkey we index (your registry)
+        run: node scripts/build-feed.mjs
+
+      - name: Commit feed
+        run: |
+          git config user.name "feed-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add public/feed/index.json public/feed/pages || true
+          git commit -m "Update feed" || echo "No changes"
+          git push || true
