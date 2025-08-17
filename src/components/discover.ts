@@ -141,18 +141,36 @@ type FeedItemPost = PostPayload & { sig: string; slot: number; ts: number; likes
 type FeedItemLike = LikePayload & { sig: string; slot: number; ts: number };
 type FeedPage = { n: number; items: Array<({ type: "post" } & FeedItemPost) | ({ type: "like" } & FeedItemLike)> };
 
+// --- BASE_URL + robust fetch to avoid HTML/DOCTYPE errors in dev ---
+const BASE_URL = (import.meta as any).env?.BASE_URL || "/"; // Vite injects this
+function feedPath(p: string) {
+  const base = BASE_URL.endsWith("/") ? BASE_URL : BASE_URL + "/";
+  const clean = String(p || "").replace(/^\//, ""); // strip leading slash
+  return base + clean;
+}
+
 async function fetchJSON<T>(path: string): Promise<T> {
-  const res = await fetch(path, { cache: "no-cache" });
-  if (!res.ok) throw new Error(`Fetch ${path} failed: ${res.status}`);
+  const url = feedPath(path);
+  const res = await fetch(url, { cache: "no-cache" });
+  if (!res.ok) {
+    const preview = (await res.text()).slice(0, 120);
+    throw new Error(`Fetch ${url} failed: ${res.status} ${res.statusText}. Body: ${preview}`);
+  }
+  const ct = res.headers.get("content-type") || "";
+  if (!ct.includes("application/json")) {
+    const preview = (await res.text()).slice(0, 120);
+    throw new Error(`Expected JSON at ${url}, got ${ct || "unknown"}: ${preview}`);
+  }
   return res.json();
 }
 
 async function loadStaticPage(): Promise<FeedItemPost[]> {
   // 1) fetch index
-  const idx = await fetchJSON<FeedIndex>("/feed/index.json");
+  const idx = await fetchJSON<FeedIndex>("feed/index.json");
   const latestPath =
-    idx.pages.find(p => p.n === idx.latestPage)?.path ||
-    `/feed/pages/page-${String(idx.latestPage).padStart(4, "0")}.json`;
+    (idx.pages.find(p => p.n === idx.latestPage)?.path ||
+     `feed/pages/page-${String(idx.latestPage).padStart(4, "0")}.json`)
+    .replace(/^\//, ""); // ensure relative for BASE_URL join
 
   // 2) fetch latest page
   const page = await fetchJSON<FeedPage>(latestPath);
